@@ -86,6 +86,32 @@ Response when none exists:
 }
 ```
 
+## Transcript Parsing Endpoints
+
+Phase 3 adds deterministic English transcript parsing. These endpoints return draft patches only. They do not create, update, or persist tracker rows.
+
+### Parse Transcript
+
+```bash
+curl -X POST http://127.0.0.1:8000/transcript/parse \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transcript": "Add a Bootcoding AI Engineer internship. Use the current link. Set priority to medium."
+  }'
+```
+
+### Parse Correction
+
+```bash
+curl -X POST http://127.0.0.1:8000/transcript/parse-correction \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transcript": "Remove Agentic AI Engineer tag. Add Networked stage. Append comment saying one request is pending."
+  }'
+```
+
+The parser is rule-based and local. It does not call Ollama, external LLM APIs, speech-to-text, or browser scraping. It only fills fields that are explicitly present in the transcript. `Current Stage`, `NEXT ACTION`, `COMMENTS`, and `ENGAGED (# OF DAYS)` are never inferred.
+
 ## CORS
 
 The backend supports local frontend origins from `FRONTEND_ORIGIN`, plus `http://localhost:3000` and `http://127.0.0.1:3000` by default.
@@ -94,4 +120,4 @@ For local unpacked Chrome extension development, the backend allows origins matc
 
 ## Scope
 
-This API exposes the Phase 1 tracker CRUD endpoints and the Phase 2 browser-context capture endpoints. It does not include AI, voice, CSV import/export, reminders, analytics, Docker, PostgreSQL, timelines, event sourcing, scraping, or metadata inference.
+This API exposes the Phase 1 tracker CRUD endpoints, the Phase 2 browser-context capture endpoints, and the Phase 3 deterministic transcript parsing endpoints. It does not include AI, voice recording, speech-to-text, CSV import/export, reminders, analytics, Docker, PostgreSQL, timelines, event sourcing, scraping, or metadata inference.

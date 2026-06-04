@@ -12,7 +12,10 @@ from .schemas import (
     JobApplicationCreate,
     JobApplicationRead,
     JobApplicationUpdate,
+    ParsedTranscriptCommand,
+    TranscriptParseRequest,
 )
+from .transcript_parser import parse_transcript
 
 Base.metadata.create_all(bind=engine)
 
@@ -59,6 +62,16 @@ async def create_browser_context(payload: BrowserContextCreate, db: Session = De
 async def get_latest_browser_context(db: Session = Depends(get_db)) -> dict[str, BrowserContext | None]:
     context = db.query(BrowserContext).order_by(BrowserContext.captured_at.desc(), BrowserContext.id.desc()).first()
     return {"context": context}
+
+
+@app.post("/transcript/parse", response_model=ParsedTranscriptCommand)
+async def parse_transcript_command(payload: TranscriptParseRequest) -> ParsedTranscriptCommand:
+    return parse_transcript(payload.transcript)
+
+
+@app.post("/transcript/parse-correction", response_model=ParsedTranscriptCommand)
+async def parse_transcript_correction(payload: TranscriptParseRequest) -> ParsedTranscriptCommand:
+    return parse_transcript(payload.transcript, correction=True)
 
 
 @app.post("/applications", response_model=JobApplicationRead, status_code=status.HTTP_201_CREATED)

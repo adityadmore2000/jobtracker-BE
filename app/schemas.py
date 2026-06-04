@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, field_validator
 
@@ -9,6 +9,7 @@ from .constants import (
     ALLOWED_LOCATIONS,
     ALLOWED_PRIORITIES,
     ALLOWED_ROLES,
+    STATUS_OPTIONS,
 )
 
 http_url_adapter = TypeAdapter(HttpUrl)
@@ -195,3 +196,88 @@ class BrowserContextRead(BaseModel):
 
 class BrowserContextResponse(BaseModel):
     context: BrowserContextRead | None
+
+
+class TranscriptParseRequest(BaseModel):
+    transcript: str = Field(min_length=1)
+
+    @field_validator("transcript")
+    @classmethod
+    def transcript_required(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("transcript is required")
+        return stripped
+
+
+class JobDraftPatch(BaseModel):
+    company: str | None = None
+    roles_add: list[str] = Field(default_factory=list)
+    roles_remove: list[str] = Field(default_factory=list)
+    employment_types_add: list[str] = Field(default_factory=list)
+    employment_types_remove: list[str] = Field(default_factory=list)
+    job_link: str | None = None
+    use_latest_browser_url: bool = False
+    location: str | None = None
+    status: str | None = None
+    current_stages_add: list[str] = Field(default_factory=list)
+    current_stages_remove: list[str] = Field(default_factory=list)
+    priority: str | None = None
+    engaged_days: int | None = Field(default=None, ge=0)
+    next_action: str | None = None
+    comments_replace: str | None = None
+    comments_append: str | None = None
+
+    @field_validator("roles_add", "roles_remove")
+    @classmethod
+    def draft_roles_are_allowed(cls, values: list[str]) -> list[str]:
+        return validate_allowed_list(values, ALLOWED_ROLES, "roles")
+
+    @field_validator("employment_types_add", "employment_types_remove")
+    @classmethod
+    def draft_employment_types_are_allowed(cls, values: list[str]) -> list[str]:
+        return validate_allowed_list(values, ALLOWED_EMPLOYMENT_TYPES, "employment_types")
+
+    @field_validator("current_stages_add", "current_stages_remove")
+    @classmethod
+    def draft_current_stages_are_allowed(cls, values: list[str]) -> list[str]:
+        return validate_allowed_list(values, ALLOWED_CURRENT_STAGES, "current_stages")
+
+    @field_validator("job_link")
+    @classmethod
+    def draft_job_link_is_url_or_empty(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            return None
+        http_url_adapter.validate_python(value)
+        return value
+
+    @field_validator("location")
+    @classmethod
+    def draft_location_is_allowed(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_optional_allowed(value, ALLOWED_LOCATIONS, "location")
+
+    @field_validator("status")
+    @classmethod
+    def draft_status_is_allowed(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_optional_allowed(value, STATUS_OPTIONS, "status")
+
+    @field_validator("priority")
+    @classmethod
+    def draft_priority_is_allowed(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_optional_allowed(value, ALLOWED_PRIORITIES, "priority")
+
+
+class ParsedTranscriptCommand(BaseModel):
+    intent: Literal["ADD_APPLICATION", "PATCH_ACTIVE_DRAFT", "SAVE_ACTIVE_DRAFT", "CANCEL_ACTIVE_DRAFT", "UNKNOWN"]
+    patch: JobDraftPatch
+    raw_transcript: str
+    warnings: list[str] = Field(default_factory=list)

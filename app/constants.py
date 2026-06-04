@@ -41,3 +41,12 @@ ALLOWED_PRIORITIES = [
     "MEDIUM",
     "HIGH",
 ]
+
+STATUS_OPTIONS = [
+    "Interested",
+    "Applied",
+    "Rejected",
+    "Interview",
+    "Offer",
+    "Archived",
+]

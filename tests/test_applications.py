@@ -66,6 +66,12 @@ async def create_browser_context(client, payload=None):
     return response.json()["context"]
 
 
+async def parse_transcript(client, transcript, path="/transcript/parse"):
+    response = await client.post(path, json={"transcript": transcript})
+    assert response.status_code == 200
+    return response.json()
+
+
 def assert_bootcoding_current_stages(record):
     assert record["current_stages_json"] == ["Tailored", "Applied", "Networked"]
 
@@ -204,6 +210,263 @@ async def test_get_latest_browser_context_response_shape_is_consistent(client):
     assert populated_response.status_code == 200
     assert set(populated_response.json().keys()) == {"context"}
     assert set(populated_response.json()["context"].keys()) == {"id", "url", "page_title", "captured_at"}
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_basic_add(client):
+    parsed = await parse_transcript(
+        client,
+        """
+        Add a Bootcoding AI Engineer internship.
+        Use the current link.
+        It is onsite.
+        Set priority to medium.
+        Add Tailored and Applied stages.
+        """,
+    )
+
+    patch = parsed["patch"]
+    assert parsed["intent"] == "ADD_APPLICATION"
+    assert patch["company"] == "Bootcoding"
+    assert patch["roles_add"] == ["AI Engineer"]
+    assert patch["employment_types_add"] == ["Internship"]
+    assert patch["use_latest_browser_url"] is True
+    assert patch["location"] == "onsite"
+    assert patch["priority"] == "MEDIUM"
+    assert patch["current_stages_add"] == ["Tailored", "Applied"]
+    assert patch["next_action"] is None
+    assert patch["comments_append"] is None
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_arbitrary_order(client):
+    parsed = await parse_transcript(
+        client,
+        "Set priority to high. Remote role. Company Gruve. Full time. Add LLM Engineer role.",
+    )
+
+    patch = parsed["patch"]
+    assert patch["company"] == "Gruve"
+    assert patch["priority"] == "HIGH"
+    assert patch["location"] == "remote"
+    assert patch["employment_types_add"] == ["Full Time"]
+    assert patch["roles_add"] == ["LLM Engineer"]
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_explicit_comment_only(client):
+    parsed = await parse_transcript(client, "Update Bootcoding. Add a comment saying one LinkedIn request is pending.")
+
+    patch = parsed["patch"]
+    assert patch["comments_append"] == "one LinkedIn request is pending"
+    assert patch["current_stages_add"] == []
+    assert patch["next_action"] is None
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_explicit_next_action(client):
+    parsed = await parse_transcript(client, "Next action check request status in two days.")
+
+    assert parsed["patch"]["next_action"] == "check request status in two days"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_future_action_phrases(client):
+    should_action = await parse_transcript(client, "I should continue engaging before reaching out.")
+    need_action = await parse_transcript(client, "I need to check the recruiter response tomorrow.")
+    next_step_action = await parse_transcript(client, "My next step is to send a follow-up.")
+
+    assert should_action["patch"]["next_action"] == "continue engaging before reaching out"
+    assert need_action["patch"]["next_action"] == "check the recruiter response tomorrow"
+    assert next_step_action["patch"]["next_action"] == "send a follow-up"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_does_not_infer_next_action(client):
+    parsed = await parse_transcript(client, "Add a comment saying one request is pending.")
+
+    assert parsed["patch"]["next_action"] is None
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_does_not_infer_current_stage_from_comment(client):
+    parsed = await parse_transcript(client, "Add a comment saying one LinkedIn request is pending.")
+
+    assert parsed["patch"]["current_stages_add"] == []
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_ignores_geographic_places_and_unmatched_narrative(client):
+    parsed = await parse_transcript(
+        client,
+        "Add an Analytics Vidhya Generative AI Engineer internship. The role is onsite in Haryana near Pune and Bengaluru.",
+    )
+
+    patch = parsed["patch"]
+    assert patch["company"] == "Analytics Vidhya"
+    assert patch["location"] == "onsite"
+    assert patch["comments_append"] is None
+    assert patch["comments_replace"] is None
+    assert patch["next_action"] is None
+    assert patch["job_link"] is None
+    assert patch["priority"] is None
+    assert patch["engaged_days"] is None
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_explicit_stage_addition(client):
+    parsed = await parse_transcript(client, "Add Networked stage.")
+
+    assert parsed["patch"]["current_stages_add"] == ["Networked"]
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_explicit_stage_removal(client):
+    parsed = await parse_transcript(client, "Remove Networked stage.", "/transcript/parse-correction")
+
+    assert parsed["intent"] == "PATCH_ACTIVE_DRAFT"
+    assert parsed["patch"]["current_stages_remove"] == ["Networked"]
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_status_independence_for_applied_stage(client):
+    parsed = await parse_transcript(client, "Add Applied stage.")
+
+    assert parsed["patch"]["current_stages_add"] == ["Applied"]
+    assert parsed["patch"]["status"] is None
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_status_only_when_explicit(client):
+    parsed = await parse_transcript(client, "Set status to Applied.")
+
+    assert parsed["patch"]["status"] == "Applied"
+    assert parsed["patch"]["current_stages_add"] == []
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_reported_analytics_vidhya_example(client):
+    parsed = await parse_transcript(
+        client,
+        """
+        Add an Analytics Vidhya Generative AI Engineer internship.
+        It is onsite in Haryana.
+        Status is Applied.
+        Current stages are Tailored and Engaged.
+        I should Continue engaging for a few more days before reaching out to relevant employees for referrals.
+        """,
+    )
+
+    patch = parsed["patch"]
+    assert parsed["intent"] == "ADD_APPLICATION"
+    assert patch["company"] == "Analytics Vidhya"
+    assert patch["roles_add"] == ["Generative AI Engineer"]
+    assert patch["employment_types_add"] == ["Internship"]
+    assert patch["location"] == "onsite"
+    assert patch["status"] == "Applied"
+    assert patch["current_stages_add"] == ["Tailored", "Engaged"]
+    assert patch["next_action"] == "Continue engaging for a few more days before reaching out to relevant employees for referrals"
+    assert patch["comments_append"] is None
+    assert patch["priority"] is None
+    assert patch["engaged_days"] is None
+    assert patch["job_link"] is None
+    assert patch["use_latest_browser_url"] is False
+
+
+@pytest.mark.anyio
+async def test_parse_narrative_patch_does_not_return_unsupported_warning(client):
+    parsed = await parse_transcript(
+        client,
+        """
+        Applied for the Generative AI Engineer internship at Analytics Vidhya.
+        The role is on-site.
+        I have already tailored my application and started engaging with their posts.
+        I should continue engaging for a few more days.
+        """,
+    )
+
+    patch = parsed["patch"]
+    assert parsed["intent"] == "ADD_APPLICATION"
+    assert "No supported command was detected." not in parsed["warnings"]
+    assert patch["company"] == "Analytics Vidhya"
+    assert patch["roles_add"] == ["Generative AI Engineer"]
+    assert patch["employment_types_add"] == ["Internship"]
+    assert patch["location"] == "onsite"
+    assert patch["status"] == "Applied"
+    assert patch["current_stages_add"] == ["Tailored", "Engaged"]
+    assert patch["next_action"] is not None
+
+
+@pytest.mark.anyio
+async def test_parse_partial_narrative_patch_does_not_return_unsupported_warning(client):
+    parsed = await parse_transcript(client, "Applied for an internship at Analytics Vidhya.")
+
+    patch = parsed["patch"]
+    assert parsed["intent"] == "ADD_APPLICATION"
+    assert patch["company"] == "Analytics Vidhya"
+    assert patch["employment_types_add"] == ["Internship"]
+    assert patch["status"] == "Applied"
+    assert "No supported command was detected." not in parsed["warnings"]
+
+
+@pytest.mark.anyio
+async def test_parse_truly_unsupported_input_returns_unknown_warning(client):
+    parsed = await parse_transcript(client, "This looks interesting.")
+    patch = parsed["patch"]
+
+    assert parsed["intent"] == "UNKNOWN"
+    assert patch["company"] is None
+    assert patch["roles_add"] == []
+    assert patch["roles_remove"] == []
+    assert patch["employment_types_add"] == []
+    assert patch["employment_types_remove"] == []
+    assert patch["job_link"] is None
+    assert patch["use_latest_browser_url"] is False
+    assert patch["location"] is None
+    assert patch["status"] is None
+    assert patch["current_stages_add"] == []
+    assert patch["current_stages_remove"] == []
+    assert patch["priority"] is None
+    assert patch["engaged_days"] is None
+    assert patch["next_action"] is None
+    assert patch["comments_append"] is None
+    assert patch["comments_replace"] is None
+    assert "No supported command was detected." in parsed["warnings"]
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_engaged_days_explicit_only(client):
+    explicit = await parse_transcript(client, "Engaged days 3.")
+    implicit = await parse_transcript(client, "Applied three days ago.")
+
+    assert explicit["patch"]["engaged_days"] == 3
+    assert implicit["patch"]["engaged_days"] is None
+
+
+@pytest.mark.anyio
+async def test_parse_correction_returns_patch_only_values(client):
+    parsed = await parse_transcript(
+        client,
+        "Remove Agentic AI Engineer tag. Add Networked. Add a comment saying one request is pending. Use current link.",
+        "/transcript/parse-correction",
+    )
+
+    patch = parsed["patch"]
+    assert parsed["intent"] == "PATCH_ACTIVE_DRAFT"
+    assert patch["roles_remove"] == ["Agentic AI Engineer"]
+    assert patch["roles_add"] == []
+    assert patch["current_stages_add"] == ["Networked"]
+    assert patch["comments_append"] == "one request is pending"
+    assert patch["use_latest_browser_url"] is True
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_endpoints_do_not_persist_applications(client):
+    await parse_transcript(client, "Add a Bootcoding AI Engineer internship.")
+    response = await client.get("/applications")
+
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 @pytest.mark.anyio
