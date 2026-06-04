@@ -53,6 +53,19 @@ async def create_record(client, payload=None):
     return response.json()
 
 
+async def create_browser_context(client, payload=None):
+    response = await client.post(
+        "/browser-context",
+        json=payload
+        or {
+            "url": "https://example.com/job",
+            "page_title": "AI Engineer - Example Company",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()["context"]
+
+
 def assert_bootcoding_current_stages(record):
     assert record["current_stages_json"] == ["Tailored", "Applied", "Networked"]
 
@@ -78,6 +91,119 @@ async def test_local_frontend_origins_are_allowed_for_cors_preflight(client):
 
         assert response.status_code == 200
         assert response.headers["access-control-allow-origin"] == origin
+
+
+@pytest.mark.anyio
+async def test_chrome_extension_origin_is_allowed_for_cors_preflight(client):
+    origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+    response = await client.options(
+        "/browser-context",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == origin
+
+
+@pytest.mark.anyio
+async def test_post_valid_browser_context(client):
+    context = await create_browser_context(client)
+
+    assert context["id"] == 1
+    assert context["url"] == "https://example.com/job"
+    assert context["page_title"] == "AI Engineer - Example Company"
+    assert context["captured_at"]
+
+
+@pytest.mark.anyio
+async def test_get_latest_browser_context(client):
+    created = await create_browser_context(client)
+    response = await client.get("/browser-context/latest")
+
+    assert response.status_code == 200
+    assert response.json() == {"context": created}
+
+
+@pytest.mark.anyio
+async def test_latest_browser_context_ordering(client):
+    first = await create_browser_context(client, {"url": "https://example.com/first", "page_title": "First"})
+    second = await create_browser_context(client, {"url": "https://example.com/second", "page_title": "Second"})
+    response = await client.get("/browser-context/latest")
+
+    assert response.status_code == 200
+    assert response.json()["context"]["id"] == second["id"]
+    assert response.json()["context"]["id"] != first["id"]
+
+
+@pytest.mark.anyio
+async def test_browser_context_invalid_url_rejection(client):
+    response = await client.post("/browser-context", json={"url": "not a url", "page_title": "Invalid"})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_browser_context_rejects_non_http_url_schemes(client):
+    for url in ["chrome://extensions", "file:///tmp/job.html", "about:blank"]:
+        response = await client.post("/browser-context", json={"url": url, "page_title": "Unsupported"})
+
+        assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_browser_context_empty_state_response(client):
+    response = await client.get("/browser-context/latest")
+
+    assert response.status_code == 200
+    assert response.json() == {"context": None}
+
+
+@pytest.mark.anyio
+async def test_captured_context_does_not_modify_job_applications(client):
+    created_application = await create_record(client)
+    await create_browser_context(client, {"url": "https://example.com/context", "page_title": "Context Only"})
+
+    fetched_application = await client.get(f"/applications/{created_application['id']}")
+    listed_applications = await client.get("/applications")
+
+    assert fetched_application.status_code == 200
+    assert fetched_application.json() == created_application
+    assert listed_applications.status_code == 200
+    assert listed_applications.json() == [created_application]
+
+
+@pytest.mark.anyio
+async def test_captured_context_does_not_infer_application_fields(client):
+    await create_browser_context(client, {"url": "https://example.com/job", "page_title": "AI Engineer - Example Company"})
+    response = await client.get("/applications")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.anyio
+async def test_browser_context_page_title_may_be_blank(client):
+    context = await create_browser_context(client, {"url": "https://example.com/job", "page_title": ""})
+
+    assert context["url"] == "https://example.com/job"
+    assert context["page_title"] == ""
+
+
+@pytest.mark.anyio
+async def test_get_latest_browser_context_response_shape_is_consistent(client):
+    empty_response = await client.get("/browser-context/latest")
+    assert empty_response.status_code == 200
+    assert set(empty_response.json().keys()) == {"context"}
+
+    await create_browser_context(client)
+    populated_response = await client.get("/browser-context/latest")
+    assert populated_response.status_code == 200
+    assert set(populated_response.json().keys()) == {"context"}
+    assert set(populated_response.json()["context"].keys()) == {"id", "url", "page_title", "captured_at"}
 
 
 @pytest.mark.anyio

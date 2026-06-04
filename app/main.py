@@ -5,8 +5,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from .database import Base, engine, get_db
-from .models import JobApplication
-from .schemas import JobApplicationCreate, JobApplicationRead, JobApplicationUpdate
+from .models import BrowserContext, JobApplication
+from .schemas import (
+    BrowserContextCreate,
+    BrowserContextResponse,
+    JobApplicationCreate,
+    JobApplicationRead,
+    JobApplicationUpdate,
+)
 
 Base.metadata.create_all(bind=engine)
 
@@ -23,6 +29,7 @@ def get_frontend_origins() -> list[str]:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_frontend_origins(),
+    allow_origin_regex=r"chrome-extension://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -37,6 +44,21 @@ async def health() -> dict[str, str]:
 @app.get("/applications", response_model=list[JobApplicationRead])
 async def list_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
     return db.query(JobApplication).order_by(JobApplication.updated_at.desc()).all()
+
+
+@app.post("/browser-context", response_model=BrowserContextResponse, status_code=status.HTTP_201_CREATED)
+async def create_browser_context(payload: BrowserContextCreate, db: Session = Depends(get_db)) -> dict[str, BrowserContext]:
+    context = BrowserContext(**payload.model_dump())
+    db.add(context)
+    db.commit()
+    db.refresh(context)
+    return {"context": context}
+
+
+@app.get("/browser-context/latest", response_model=BrowserContextResponse)
+async def get_latest_browser_context(db: Session = Depends(get_db)) -> dict[str, BrowserContext | None]:
+    context = db.query(BrowserContext).order_by(BrowserContext.captured_at.desc(), BrowserContext.id.desc()).first()
+    return {"context": context}
 
 
 @app.post("/applications", response_model=JobApplicationRead, status_code=status.HTTP_201_CREATED)

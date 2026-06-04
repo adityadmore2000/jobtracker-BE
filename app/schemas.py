@@ -163,3 +163,35 @@ class JobApplicationRead(JobApplicationBase):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class BrowserContextCreate(BaseModel):
+    url: str
+    page_title: str = ""
+
+    @field_validator("url")
+    @classmethod
+    def url_must_be_http_or_https(cls, value: str) -> str:
+        value = value.strip()
+        parsed_url = http_url_adapter.validate_python(value)
+        if parsed_url.scheme not in {"http", "https"}:
+            raise ValueError("url must use http or https")
+        return value
+
+    @field_validator("page_title")
+    @classmethod
+    def normalize_page_title(cls, value: str | None) -> str:
+        return "" if value is None else value
+
+
+class BrowserContextRead(BaseModel):
+    id: int
+    url: str
+    page_title: str
+    captured_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BrowserContextResponse(BaseModel):
+    context: BrowserContextRead | None
