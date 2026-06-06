@@ -94,6 +94,32 @@ class JobApplicationCreate(JobApplicationBase):
     pass
 
 
+class ApplicationCreateCandidateRequest(JobApplicationBase):
+    raw_transcript: str | None = None
+    original_extracted_company_name: str | None = None
+    audio_reference: str | None = None
+
+    @field_validator("raw_transcript", "original_extracted_company_name", "audio_reference")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        return stripped or None
+
+
+class ApplicationCompanyConfirmationRequest(ApplicationCreateCandidateRequest):
+    confirmed_company_name: str = Field(min_length=1)
+
+    @field_validator("confirmed_company_name")
+    @classmethod
+    def confirmed_company_name_required(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("confirmed_company_name is required")
+        return stripped
+
+
 class JobApplicationUpdate(BaseModel):
     company: str | None = Field(default=None, min_length=1)
     roles_json: list[str] | None = None
@@ -198,6 +224,21 @@ class BrowserContextResponse(BaseModel):
     context: BrowserContextRead | None
 
 
+class ApplicationCreateCandidateRequiresConfirmation(BaseModel):
+    status: Literal["confirmation_required"]
+    requires_confirmation: Literal[True] = True
+    candidate: ApplicationCreateCandidateRequest
+
+
+class ApplicationCreateCandidateCreated(BaseModel):
+    status: Literal["created"]
+    requires_confirmation: Literal[False] = False
+    application: JobApplicationRead
+
+
+ApplicationCreateCandidateResponse = ApplicationCreateCandidateRequiresConfirmation | ApplicationCreateCandidateCreated
+
+
 class TranscriptParseRequest(BaseModel):
     transcript: str = Field(min_length=1)
 
@@ -281,3 +322,8 @@ class ParsedTranscriptCommand(BaseModel):
     patch: JobDraftPatch
     raw_transcript: str
     warnings: list[str] = Field(default_factory=list)
+
+
+class AsrHotwordsResponse(BaseModel):
+    hotwords: list[str]
+    limit: int

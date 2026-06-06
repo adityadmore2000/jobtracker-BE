@@ -8,8 +8,9 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.database import Base, engine
+from app.database import Base, SessionLocal, engine
 from app.main import app
+from app.models import AsrCompanyCorrectionEvent, CanonicalCompany, CompanyAlias
 
 
 REALISTIC_RECORD = {
@@ -49,6 +50,18 @@ async def client():
 
 async def create_record(client, payload=None):
     response = await client.post("/applications", json=payload or REALISTIC_RECORD)
+    assert response.status_code == 201
+    return response.json()
+
+
+async def create_candidate(client, payload):
+    response = await client.post("/applications/create-candidate", json=payload)
+    assert response.status_code == 200
+    return response.json()
+
+
+async def confirm_candidate(client, payload):
+    response = await client.post("/applications/confirm-company", json=payload)
     assert response.status_code == 201
     return response.json()
 
@@ -664,6 +677,308 @@ async def test_engaged_days_remains_exactly_what_user_submitted(client):
     response = await client.patch(f"/applications/{created['id']}", json={"engaged_days": 7})
     assert response.status_code == 200
     assert response.json()["engaged_days"] == 7
+
+
+@pytest.mark.anyio
+async def test_new_company_create_request_returns_confirmation_required(client):
+    response = await create_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+        },
+    )
+
+    assert response["status"] == "confirmation_required"
+    assert response["requires_confirmation"] is True
+    assert response["candidate"]["company"] == "Crew Trim Labs"
+
+    listed = await client.get("/applications")
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+
+@pytest.mark.anyio
+async def test_confirming_unchanged_new_company_name_creates_application(client):
+    created = await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Crew Trim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+            "audio_reference": None,
+        },
+    )
+
+    assert created["company"] == "Crew Trim Labs"
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    assert "Crew Trim Labs" in hotwords.json()["hotwords"]
+
+
+@pytest.mark.anyio
+async def test_correcting_new_company_name_uses_confirmed_canonical_name(client):
+    created = await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+            "audio_reference": "session-1/chunk-1",
+        },
+    )
+
+    assert created["company"] == "Krutrim Labs"
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    body = hotwords.json()
+    assert "Krutrim Labs" in body["hotwords"]
+    assert "Crew Trim Labs" in body["hotwords"]
+
+
+@pytest.mark.anyio
+async def test_changed_asr_company_name_becomes_alias_when_meaningfully_different(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+            "audio_reference": None,
+        },
+    )
+
+    response = await create_candidate(
+        client,
+        {
+            "company": "crew trim labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Internship"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+        },
+    )
+
+    assert response["status"] == "created"
+    assert response["application"]["company"] == "Krutrim Labs"
+
+
+@pytest.mark.anyio
+async def test_existing_company_create_path_does_not_trigger_confirmation_popup(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Analytics Vidhya",
+            "confirmed_company_name": "Analytics Vidhya",
+            "roles_json": ["Generative AI Engineer"],
+            "employment_types_json": ["Internship"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Analytics Vidhya for a Generative AI Engineer internship.",
+            "original_extracted_company_name": "Analytics Vidhya",
+        },
+    )
+
+    response = await create_candidate(
+        client,
+        {
+            "company": " analytics   vidhya ",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+        },
+    )
+
+    assert response["status"] == "created"
+    assert response["application"]["company"] == "Analytics Vidhya"
+
+
+@pytest.mark.anyio
+async def test_alias_lookup_resolves_to_canonical_company(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+        },
+    )
+
+    response = await create_candidate(
+        client,
+        {
+            "company": "Crew-Trim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Part Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+        },
+    )
+
+    assert response["status"] == "created"
+    assert response["application"]["company"] == "Krutrim Labs"
+
+
+@pytest.mark.anyio
+async def test_hotword_list_is_deduplicated_and_bounded(client):
+    for index in range(1, 120):
+        await confirm_candidate(
+            client,
+            {
+                "company": f"Company {index}",
+                "confirmed_company_name": f"Company {index}",
+                "roles_json": ["AI Engineer"],
+                "employment_types_json": ["Full Time"],
+                "job_link": "",
+                "location": "",
+                "status": "",
+                "current_stages_json": [],
+                "priority": "",
+                "engaged_days": 0,
+                "next_action": "",
+                "comments": "",
+                "raw_transcript": f"Add Company {index} for an AI Engineer role.",
+                "original_extracted_company_name": f"Company {index}",
+            },
+        )
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    body = hotwords.json()
+    assert body["limit"] == 100
+    assert len(body["hotwords"]) == 100
+    assert len({value.lower() for value in body["hotwords"]}) == len(body["hotwords"])
+
+
+@pytest.mark.anyio
+async def test_correction_event_is_persisted(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+            "audio_reference": "audio-ref-123",
+        },
+    )
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    assert "Crew Trim Labs" in hotwords.json()["hotwords"]
+
+    applications = await client.get("/applications")
+    assert applications.status_code == 200
+    assert applications.json()[0]["company"] == "Krutrim Labs"
+
+    with SessionLocal() as db:
+        correction_events = db.query(AsrCompanyCorrectionEvent).all()
+        assert len(correction_events) == 1
+        event = correction_events[0]
+        assert event.raw_transcript == "Add Crew Trim Labs for an AI Engineer role."
+        assert event.original_extracted_company_name == "Crew Trim Labs"
+        assert event.confirmed_company_name == "Krutrim Labs"
+        assert event.alias_created is True
+        assert event.audio_reference == "audio-ref-123"
+
+        canonical_companies = db.query(CanonicalCompany).all()
+        aliases = db.query(CompanyAlias).all()
+        assert len(canonical_companies) == 1
+        assert canonical_companies[0].canonical_name == "Krutrim Labs"
+        assert len(aliases) == 1
+        assert aliases[0].alias_text == "Crew Trim Labs"
 
 
 @pytest.mark.anyio
