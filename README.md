@@ -269,6 +269,7 @@ Context policy:
 - `active_application` is only for an explicitly selected persisted tracker row.
 - `recent_actions` are prompt context only and do not authorize persisted-row mutation.
 - Saved-row updates require explicit company in the utterance or an explicitly selected persisted row id.
+- `request_draft_save` may prepare a draft for the normal save flow, but it must not persist directly from the LLM tool call.
 - Read/delete transcript tools have not been added yet.
 
 Unsupported or incomplete commands:
@@ -285,6 +286,7 @@ Unsupported or incomplete commands:
 - Single create proposals return one editable preview draft.
 - Multi-role create proposals return multiple drafts and set `needs_confirmation=true`.
 - Existing-application updates return a resolved preview draft only when exactly one row matches.
+- `request_draft_save` remains preview-only and must route through the normal explicit save path.
 - Context-based follow-ups can use a bounded session context payload from the frontend.
 - If Ollama is unavailable, times out, returns malformed JSON, or returns schema-invalid output, the backend returns a recoverable error and no tracker changes are saved.
 - Regex-based transcript interpretation has been removed completely.
