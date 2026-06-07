@@ -1105,11 +1105,23 @@ async def test_delete_application_preserves_asr_correction_history_and_nulls_app
         assert event.confirmed_company_name == "Krutrim Labs"
         assert event.alias_created is True
         assert event.audio_reference == "audio-ref-delete-test"
+        canonical_companies = db.query(CanonicalCompany).all()
+        aliases = db.query(CompanyAlias).all()
+        assert len(canonical_companies) == 1
+        assert canonical_companies[0].canonical_name == "Krutrim Labs"
+        assert len(aliases) == 1
+        assert aliases[0].alias_text == "Crew Trim Labs"
 
     exported_events = export_correction_events()
     assert len(exported_events) == 1
     assert exported_events[0]["application_id"] is None
     assert exported_events[0]["audio_reference"] == "audio-ref-delete-test"
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    body = hotwords.json()["hotwords"]
+    assert "Krutrim Labs" in body
+    assert "Crew Trim Labs" not in body
 
 
 @pytest.mark.anyio
@@ -1331,7 +1343,7 @@ async def test_correcting_new_company_name_uses_confirmed_canonical_name(client)
     assert hotwords.status_code == 200
     body = hotwords.json()
     assert "Krutrim Labs" in body["hotwords"]
-    assert "Crew Trim Labs" in body["hotwords"]
+    assert "Crew Trim Labs" not in body["hotwords"]
 
 
 @pytest.mark.anyio
@@ -1496,7 +1508,7 @@ async def test_hotword_list_is_deduplicated_and_bounded(client):
 
 
 @pytest.mark.anyio
-async def test_hotword_list_prefers_canonical_name_and_ignores_duplicate_aliases(client):
+async def test_hotword_list_returns_canonical_name_and_excludes_aliases(client):
     await confirm_candidate(
         client,
         {
@@ -1540,8 +1552,41 @@ async def test_hotword_list_prefers_canonical_name_and_ignores_duplicate_aliases
     hotwords = await client.get("/asr/hotwords")
     assert hotwords.status_code == 200
     body = hotwords.json()["hotwords"]
-    assert body.index("Krutrim Labs") < body.index("Crew Trim Labs")
-    assert sum(1 for value in body if value.lower().replace(" ", "") == "crewtrimlabs") == 1
+    assert "Krutrim Labs" in body
+    assert "Crew Trim Labs" not in body
+    assert "crew   trim   labs" not in body
+
+
+@pytest.mark.anyio
+async def test_hotword_list_retains_canonical_company_after_last_application_is_deleted(client):
+    created = await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+        },
+    )
+
+    deleted = await client.delete(f"/applications/{created['id']}")
+    assert deleted.status_code == 204
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    body = hotwords.json()["hotwords"]
+    assert "Krutrim Labs" in body
+    assert "Crew Trim Labs" not in body
 
 
 @pytest.mark.anyio
@@ -1575,7 +1620,27 @@ async def test_hotword_list_ignores_blank_values_and_preserves_static_vocabulary
 
 
 @pytest.mark.anyio
-async def test_case_and_punctuation_only_confirmation_change_does_not_create_redundant_alias(client):
+async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_aliases(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Krutrim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Krutrim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "   ",
+        },
+    )
+
     await confirm_candidate(
         client,
         {
@@ -1596,11 +1661,51 @@ async def test_case_and_punctuation_only_confirmation_change_does_not_create_red
         },
     )
 
+    await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+        },
+    )
+
+    await confirm_candidate(
+        client,
+        {
+            "company": "crew   trim   labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Internship"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add crew trim labs for an AI Engineer role.",
+            "original_extracted_company_name": "crew   trim   labs",
+        },
+    )
+
     with SessionLocal() as db:
-        aliases = db.query(CompanyAlias).all()
-        assert aliases == []
-        correction_event = db.query(AsrCompanyCorrectionEvent).one()
-        assert correction_event.alias_created is False
+        aliases = db.query(CompanyAlias).order_by(CompanyAlias.alias_text.asc()).all()
+        assert [alias.alias_text for alias in aliases] == ["Crew Trim Labs"]
+        correction_events = db.query(AsrCompanyCorrectionEvent).order_by(AsrCompanyCorrectionEvent.id.asc()).all()
+        assert [event.alias_created for event in correction_events] == [False, False, True, False]
 
 
 @pytest.mark.anyio
@@ -1628,7 +1733,9 @@ async def test_correction_event_is_persisted(client):
 
     hotwords = await client.get("/asr/hotwords")
     assert hotwords.status_code == 200
-    assert "Crew Trim Labs" in hotwords.json()["hotwords"]
+    body = hotwords.json()["hotwords"]
+    assert "Krutrim Labs" in body
+    assert "Crew Trim Labs" not in body
 
     applications = await client.get("/applications")
     assert applications.status_code == 200

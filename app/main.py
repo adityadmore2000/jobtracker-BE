@@ -145,14 +145,8 @@ def build_hotword_list(db: Session, limit: int = HOTWORD_LIMIT) -> list[str]:
                 return
 
     canonical_values = [row.canonical_name for row in db.query(CanonicalCompany).order_by(CanonicalCompany.canonical_name.asc()).all()]
-    alias_values = [row.alias_text for row in db.query(CompanyAlias).order_by(CompanyAlias.alias_text.asc()).all()]
-    application_values = [row[0] for row in db.query(JobApplication.company).distinct().order_by(JobApplication.company.asc()).all()]
 
     add_values(canonical_values)
-    if len(hotwords) < limit:
-        add_values(alias_values)
-    if len(hotwords) < limit:
-        add_values(application_values)
     if len(hotwords) < limit:
         add_values(STATIC_HOTWORDS)
 
