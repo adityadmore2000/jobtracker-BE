@@ -21,6 +21,11 @@ DATABASE_URL=postgresql+psycopg://<user>:<password>@localhost:5432/job_tracker
 TEST_DATABASE_URL=postgresql+psycopg://<user>:<password>@localhost:5432/job_tracker_test
 FRONTEND_ORIGIN=http://localhost:3000,http://127.0.0.1:3000
 AUTO_MIGRATE=false
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=llama3.2:3b
+OLLAMA_TIMEOUT_SECONDS=20
+OLLAMA_KEEP_ALIVE=10m
+OLLAMA_MAX_TOOL_TURNS=2
 ```
 
 The backend automatically loads `jobtracker-BE/.env` relative to the backend root.
@@ -103,6 +108,9 @@ alembic upgrade head
 ## Run
 
 ```bash
+docker start resume_tailor
+docker start ollama
+
 cd /home/aditya/dev-work/job_tracker_assistant/jobtracker-BE
 source .venv/bin/activate
 uvicorn app.main:app --reload
@@ -173,7 +181,52 @@ Response when none exists:
 
 ## Transcript Parsing Endpoints
 
-Phase 3 adds deterministic English transcript parsing. These endpoints return draft patches only. They do not create, update, or persist tracker rows.
+Phase 3 now uses a local Ollama-backed semantic interpreter. Transcript requests stay non-persistent: they prepare create or update previews, but they do not create, update, or persist tracker rows by themselves.
+
+Architecture:
+
+```text
+transcript
+    -> Ollama /api/chat with llama3.2:3b
+    -> one tool call from message.tool_calls
+    -> Pydantic tool-argument validation
+    -> deterministic backend validation and resolution
+    -> preview / clarification / confirmation response
+    -> database mutation only through the normal create/update endpoints
+```
+
+The backend remains authoritative for:
+
+- allowed enum validation
+- exact normalized company lookup
+- canonical company alias lookup
+- role alias canonicalization
+- ambiguity detection
+- partial unsaved-draft acceptance
+- clarification templates for common missing-target cases
+- new-company confirmation
+- preview-before-save behavior
+- database writes
+
+The interpreter is never allowed to write to PostgreSQL directly.
+Regex transcript parsing remains removed. LiveKit has not been added.
+
+### Semantic Interpreter Health
+
+```bash
+curl http://127.0.0.1:8000/semantic-interpreter/health
+```
+
+Example response:
+
+```json
+{
+  "status": "ok",
+  "provider": "ollama",
+  "model": "llama3.2:3b",
+  "mode": "tool_calling"
+}
+```
 
 ### Parse Transcript
 
@@ -181,21 +234,61 @@ Phase 3 adds deterministic English transcript parsing. These endpoints return dr
 curl -X POST http://127.0.0.1:8000/transcript/parse \
   -H "Content-Type: application/json" \
   -d '{
-    "transcript": "Add a Bootcoding AI Engineer internship. Use the current link. Set priority to medium."
+    "transcript": "Add AI Engineer role for Neilsoft"
   }'
 ```
 
-### Parse Correction
+### Supported Transcript Examples
 
-```bash
-curl -X POST http://127.0.0.1:8000/transcript/parse-correction \
-  -H "Content-Type: application/json" \
-  -d '{
-    "transcript": "Remove Agentic AI Engineer tag. Add Networked stage. Append comment saying one request is pending."
-  }'
-```
+Create commands:
 
-The parser is rule-based and local. It does not call Ollama, external LLM APIs, speech-to-text, or browser scraping. It only fills fields that are explicitly present in the transcript. `Current Stage`, `NEXT ACTION`, `COMMENTS`, and `ENGAGED (# OF DAYS)` are never inferred.
+- `I have a requirement. I want to add an application neilsoft`
+- `Add a Neilsoft application`
+- `Neilsoft sathi application add kar`
+- `Add AI Engineer role for Neilsoft`
+- `Add Neilsoft for AI Engineer role`
+- `Track an AI Engineer opening at Neilsoft`
+- `I applied to Neilsoft as an AI Engineer`
+- `Add Neilsoft for RAG`
+- `Add Neilsoft for AI Engineer and RAG roles`
+- `AI Engineer role` when an active unsaved draft already exists
+- `fulltime ani onsite` when an active unsaved draft already exists
+- `Applied stage thev` when an active unsaved draft already exists
+
+Update commands:
+
+- `Mark Neilsoft as rejected`
+- `Neilsoft high priority kar`
+- `Set the next action for Neilsoft to follow up with HR`
+- `Add note saying recruiter la udya ping karaycha`
+- `Make it high priority` only when the frontend provides an explicitly selected persisted `active_application.application_id`
+
+Context policy:
+
+- `active_draft` is only for unsaved-draft enrichment.
+- `active_application` is only for an explicitly selected persisted tracker row.
+- `recent_actions` are prompt context only and do not authorize persisted-row mutation.
+- Saved-row updates require explicit company in the utterance or an explicitly selected persisted row id.
+- Read/delete transcript tools have not been added yet.
+
+Unsupported or incomplete commands:
+
+- `Add application` without a company and without an active draft
+- `Make it high priority` without an active draft and without an explicitly selected persisted row
+- Unsupported priority values such as `Set Neilsoft priority to urgent`
+- Unsupported status values such as `Mark Neilsoft as interviewing`
+- Unknown-company updates
+- Broad narration that does not clearly map to one of the supported intents
+
+### Semantic Response Behavior
+
+- Single create proposals return one editable preview draft.
+- Multi-role create proposals return multiple drafts and set `needs_confirmation=true`.
+- Existing-application updates return a resolved preview draft only when exactly one row matches.
+- Context-based follow-ups can use a bounded session context payload from the frontend.
+- If Ollama is unavailable, times out, returns malformed JSON, or returns schema-invalid output, the backend returns a recoverable error and no tracker changes are saved.
+- Regex-based transcript interpretation has been removed completely.
+- LiveKit has not been added yet.
 
 ## Company Confirmation Flow
 
@@ -305,6 +398,8 @@ Response:
 
 The hotword list is deterministic, deduplicated after normalization, and bounded to 100 items. It includes canonical companies first, then aliases, then existing tracker company values, then static job-tracker vocabulary.
 
+Deleting an application preserves ASR correction history. Related correction records retain their metadata and set `application_id` to `NULL`.
+
 ## CORS
 
 The backend supports local frontend origins from `FRONTEND_ORIGIN`, plus `http://localhost:3000` and `http://127.0.0.1:3000` by default.
@@ -313,7 +408,7 @@ For local unpacked Chrome extension development, the backend allows origins matc
 
 ## Scope
 
-This API exposes the Phase 1 tracker CRUD endpoints, the Phase 2 browser-context capture endpoints, and the Phase 3 deterministic transcript parsing endpoints. It does not include AI, voice recording, speech-to-text, CSV import/export, reminders, analytics, timelines, event sourcing, scraping, or metadata inference.
+This API exposes the Phase 1 tracker CRUD endpoints, the Phase 2 browser-context capture endpoints, and the Phase 3 Ollama-backed semantic transcript endpoints. It does not include LiveKit, voice recording, speech-to-text inside this service, CSV import/export, reminders, analytics, timelines, event sourcing, scraping, or metadata inference beyond the validated transcript proposal flow.
 
 ## Immediate Adaptation Loop
 
@@ -322,16 +417,18 @@ The current local ASR adaptation loop is:
 ```text
 transcript input
     -> /transcript/parse
-    -> structured draft in the frontend
-    -> /applications/create-candidate
+    -> structured create or update preview in the frontend
+    -> create preview: /applications/create-candidate
     -> confirmation popup only when the company is genuinely new
-    -> /applications/confirm-company
+    -> create preview: /applications/confirm-company
+    -> update preview: PATCH /applications/{id}
     -> application row + canonical company + optional alias + correction event
     -> /asr/hotwords for later transcription requests
 ```
 
 - Existing-company creates and edits keep the low-friction path.
 - New-company creates require backend-confirmed manual company-name confirmation before persistence.
+- Existing-company transcript updates reuse exact normalized matching against canonical names, aliases, and existing tracker companies.
 - Alias creation is exact-and-normalized, not fuzzy.
 - Periodic fine-tuning is not automatically triggered in this phase.
 
@@ -351,3 +448,4 @@ Alembic manages the current required tables:
 - Existing SQLite files can remain on disk, but they are not read, written, or migrated automatically.
 - `audio_reference` is nullable metadata only; this backend does not retain audio clips.
 - Training/export review is manual. Correction capture supports later curation, not automatic fine-tuning.
+- Transcript updates require exactly one resolved application for the requested company. If multiple rows share the same company, the backend refuses to guess and asks for a manual edit instead.

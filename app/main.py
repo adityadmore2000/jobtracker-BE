@@ -3,9 +3,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .company_matching import has_meaningful_company_difference, normalize_company_name
+from .company_resolution import (
+    ensure_canonical_company,
+    get_canonical_company_by_normalized_name,
+    get_company_alias_by_normalized_name,
+    resolve_company_name,
+)
 from .constants import (
     ALLOWED_CURRENT_STAGES,
     ALLOWED_EMPLOYMENT_TYPES,
@@ -27,10 +34,11 @@ from .schemas import (
     JobApplicationCreate,
     JobApplicationRead,
     JobApplicationUpdate,
-    ParsedTranscriptCommand,
+    SemanticTranscriptResponse,
     TranscriptParseRequest,
 )
-from .transcript_parser import parse_transcript
+from .semantic_interpreter import OllamaSemanticInterpreter, get_semantic_interpreter
+from .semantic_validation import interpret_transcript_command
 
 
 @asynccontextmanager
@@ -68,64 +76,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-def get_canonical_company_by_normalized_name(db: Session, normalized_name: str) -> CanonicalCompany | None:
-    for canonical_company in db.query(CanonicalCompany).order_by(CanonicalCompany.id.asc()).all():
-        if normalize_company_name(canonical_company.canonical_name) == normalized_name:
-            return canonical_company
-    return None
-
-
-def get_company_alias_by_normalized_name(db: Session, normalized_name: str) -> CompanyAlias | None:
-    for alias in db.query(CompanyAlias).order_by(CompanyAlias.id.asc()).all():
-        if normalize_company_name(alias.alias_text) == normalized_name:
-            return alias
-    return None
-
-
-def get_existing_application_company(db: Session, normalized_name: str) -> str | None:
-    seen_names: set[str] = set()
-    applications = db.query(JobApplication.company).order_by(JobApplication.id.asc()).all()
-    for (company_name,) in applications:
-        if company_name in seen_names:
-            continue
-        seen_names.add(company_name)
-        if normalize_company_name(company_name) == normalized_name:
-            return company_name
-    return None
-
-
-def ensure_canonical_company(db: Session, company_name: str) -> CanonicalCompany:
-    normalized_name = normalize_company_name(company_name)
-    existing_company = get_canonical_company_by_normalized_name(db, normalized_name)
-    if existing_company is not None:
-        return existing_company
-
-    canonical_company = CanonicalCompany(canonical_name=company_name.strip())
-    db.add(canonical_company)
-    db.flush()
-    return canonical_company
-
-
-def resolve_company_name(db: Session, company_name: str) -> tuple[str | None, CanonicalCompany | None]:
-    normalized_name = normalize_company_name(company_name)
-    if not normalized_name:
-        return None, None
-
-    canonical_company = get_canonical_company_by_normalized_name(db, normalized_name)
-    if canonical_company is not None:
-        return canonical_company.canonical_name, canonical_company
-
-    alias = get_company_alias_by_normalized_name(db, normalized_name)
-    if alias is not None:
-        return alias.canonical_company.canonical_name, alias.canonical_company
-
-    application_company = get_existing_application_company(db, normalized_name)
-    if application_company is not None:
-        return application_company, ensure_canonical_company(db, application_company)
-
-    return None, None
 
 
 def create_job_application(db: Session, payload: JobApplicationCreate) -> JobApplication:
@@ -214,6 +164,11 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/semantic-interpreter/health")
+async def semantic_interpreter_health(interpreter: OllamaSemanticInterpreter = Depends(get_semantic_interpreter)) -> dict[str, str]:
+    return interpreter.health_check()
+
+
 @app.get("/applications", response_model=list[JobApplicationRead])
 async def list_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
     return db.query(JobApplication).order_by(JobApplication.updated_at.desc()).all()
@@ -239,14 +194,13 @@ async def get_latest_browser_context(db: Session = Depends(get_db)) -> dict[str,
     return {"context": context}
 
 
-@app.post("/transcript/parse", response_model=ParsedTranscriptCommand)
-async def parse_transcript_command(payload: TranscriptParseRequest) -> ParsedTranscriptCommand:
-    return parse_transcript(payload.transcript)
-
-
-@app.post("/transcript/parse-correction", response_model=ParsedTranscriptCommand)
-async def parse_transcript_correction(payload: TranscriptParseRequest) -> ParsedTranscriptCommand:
-    return parse_transcript(payload.transcript, correction=True)
+@app.post("/transcript/parse", response_model=SemanticTranscriptResponse)
+async def parse_transcript_command(
+    payload: TranscriptParseRequest,
+    db: Session = Depends(get_db),
+    interpreter: OllamaSemanticInterpreter = Depends(get_semantic_interpreter),
+) -> SemanticTranscriptResponse:
+    return interpret_transcript_command(db, payload, interpreter)
 
 
 @app.post("/applications", response_model=JobApplicationRead, status_code=status.HTTP_201_CREATED)
@@ -330,6 +284,13 @@ async def delete_application(application_id: int, db: Session = Depends(get_db))
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
 
-    db.delete(application)
-    db.commit()
+    try:
+        db.delete(application)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Application could not be deleted because related records are still enforcing integrity constraints.",
+        ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

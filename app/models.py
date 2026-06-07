@@ -28,6 +28,11 @@ class JobApplication(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
+    correction_events: Mapped[list["AsrCompanyCorrectionEvent"]] = relationship(
+        back_populates="application",
+        passive_deletes=True,
+    )
+
 
 class CanonicalCompany(Base):
     __tablename__ = "canonical_companies"
@@ -63,12 +68,17 @@ class AsrCompanyCorrectionEvent(Base):
     original_extracted_company_name: Mapped[str] = mapped_column(String, nullable=False, default="")
     confirmed_company_name: Mapped[str] = mapped_column(String, nullable=False)
     canonical_company_id: Mapped[int] = mapped_column(ForeignKey("canonical_companies.id"), nullable=False, index=True)
-    application_id: Mapped[int | None] = mapped_column(ForeignKey("job_applications.id"), nullable=True, index=True)
+    application_id: Mapped[int | None] = mapped_column(
+        ForeignKey("job_applications.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     alias_created: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     audio_reference: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     canonical_company: Mapped["CanonicalCompany"] = relationship(back_populates="correction_events")
+    application: Mapped["JobApplication | None"] = relationship(back_populates="correction_events")
 
 
 class BrowserContext(Base):
