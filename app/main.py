@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +14,8 @@ from .constants import (
     ALLOWED_ROLES,
     STATUS_OPTIONS,
 )
-from .database import Base, engine, get_db
+from .database import get_db
+from .migrations import run_startup_migrations_if_enabled
 from .models import AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, CompanyAlias, JobApplication
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
@@ -30,9 +32,14 @@ from .schemas import (
 )
 from .transcript_parser import parse_transcript
 
-Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="ApplicationOps Tracker API")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    run_startup_migrations_if_enabled()
+    yield
+
+
+app = FastAPI(title="Job Tracker API", lifespan=lifespan)
 HOTWORD_LIMIT = 100
 STATIC_HOTWORDS = [
     *ALLOWED_ROLES,

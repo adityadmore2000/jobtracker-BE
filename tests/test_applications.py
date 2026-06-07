@@ -1,14 +1,7 @@
-import os
-import sys
-from pathlib import Path
-
-os.environ["DATABASE_URL"] = "sqlite:///./test_job_tracker.db"
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.database import Base, SessionLocal, engine
+from app.database import SessionLocal
 from app.main import app
 from app.models import AsrCompanyCorrectionEvent, CanonicalCompany, CompanyAlias
 
@@ -31,14 +24,6 @@ REALISTIC_RECORD = {
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
-
-
-@pytest.fixture(autouse=True)
-def reset_database():
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-    yield
-    Base.metadata.drop_all(bind=engine)
 
 
 @pytest.fixture
@@ -930,6 +915,114 @@ async def test_hotword_list_is_deduplicated_and_bounded(client):
     assert body["limit"] == 100
     assert len(body["hotwords"]) == 100
     assert len({value.lower() for value in body["hotwords"]}) == len(body["hotwords"])
+
+
+@pytest.mark.anyio
+async def test_hotword_list_prefers_canonical_name_and_ignores_duplicate_aliases(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Crew Trim Labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Crew Trim Labs",
+        },
+    )
+
+    await confirm_candidate(
+        client,
+        {
+            "company": "crew   trim   labs",
+            "confirmed_company_name": "Krutrim Labs",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Internship"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add crew trim labs for an AI Engineer role.",
+            "original_extracted_company_name": "crew   trim   labs",
+        },
+    )
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    body = hotwords.json()["hotwords"]
+    assert body.index("Krutrim Labs") < body.index("Crew Trim Labs")
+    assert sum(1 for value in body if value.lower().replace(" ", "") == "crewtrimlabs") == 1
+
+
+@pytest.mark.anyio
+async def test_hotword_list_ignores_blank_values_and_preserves_static_vocabulary(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Whitespace Co",
+            "confirmed_company_name": "Whitespace Co",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Whitespace Co for an AI Engineer role.",
+            "original_extracted_company_name": "   ",
+        },
+    )
+
+    hotwords = await client.get("/asr/hotwords")
+    assert hotwords.status_code == 200
+    body = hotwords.json()["hotwords"]
+    assert "" not in body
+    assert "AI Engineer" in body
+    assert "next action" in body
+
+
+@pytest.mark.anyio
+async def test_case_and_punctuation_only_confirmation_change_does_not_create_redundant_alias(client):
+    await confirm_candidate(
+        client,
+        {
+            "company": "Krutrim Labs",
+            "confirmed_company_name": "Krutrim Labs!",
+            "roles_json": ["AI Engineer"],
+            "employment_types_json": ["Full Time"],
+            "job_link": "",
+            "location": "",
+            "status": "",
+            "current_stages_json": [],
+            "priority": "",
+            "engaged_days": 0,
+            "next_action": "",
+            "comments": "",
+            "raw_transcript": "Add Krutrim Labs for an AI Engineer role.",
+            "original_extracted_company_name": "Krutrim Labs",
+        },
+    )
+
+    with SessionLocal() as db:
+        aliases = db.query(CompanyAlias).all()
+        assert aliases == []
+        correction_event = db.query(AsrCompanyCorrectionEvent).one()
+        assert correction_event.alias_created is False
 
 
 @pytest.mark.anyio

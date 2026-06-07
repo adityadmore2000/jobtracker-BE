@@ -1,6 +1,8 @@
-# ApplicationOps API
+# Job Tracker API
 
-Standalone FastAPI backend for the ApplicationOps manual job application tracker.
+Standalone FastAPI backend for the Job Tracker manual job application tracker.
+
+This backend is now PostgreSQL-only. SQLite is no longer supported, and old local `.db` files are not migrated automatically.
 
 ## Setup
 
@@ -12,22 +14,105 @@ pip install -r requirements.txt
 
 ## Environment
 
-Copy `.env.example` values into your shell or local environment as needed:
+Create `jobtracker-BE/.env` from `.env.example` and fill in your local PostgreSQL credentials:
 
 ```text
-DATABASE_URL=sqlite:///./job_tracker.db
+DATABASE_URL=postgresql+psycopg://<user>:<password>@localhost:5432/job_tracker
+TEST_DATABASE_URL=postgresql+psycopg://<user>:<password>@localhost:5432/job_tracker_test
 FRONTEND_ORIGIN=http://localhost:3000,http://127.0.0.1:3000
+AUTO_MIGRATE=false
+```
+
+The backend automatically loads `jobtracker-BE/.env` relative to the backend root.
+
+Variable precedence is:
+
+```text
+OS environment variable
+    >
+jobtracker-BE/.env
+    >
+startup error
+```
+
+Manual `source .env` and manual `DATABASE_URL` exports are not required.
+
+`DATABASE_URL` is required at startup. The backend fails clearly when it is missing or does not point to PostgreSQL.
+
+## Local PostgreSQL Bootstrap
+
+Reuse the existing local PostgreSQL server. For the current local setup, that is the existing `resume_tailor` Docker container with PostgreSQL published on local port `5432`.
+
+Create the separate `job_tracker` databases without touching the existing Resume Tailor database:
+
+```bash
+cd jobtracker-BE
+source .venv/bin/activate
+python scripts/bootstrap_postgres.py
+```
+
+This script creates:
+
+- `job_tracker`
+- `job_tracker_test`
+
+if they do not already exist.
+
+## Alembic Migration
+
+Schema management uses Alembic. You can either enable automatic migrations at startup or run them manually.
+
+### Automatic Migration On Startup
+
+Set this in `jobtracker-BE/.env`:
+
+```text
+AUTO_MIGRATE=true
+```
+
+Then use the normal local startup flow:
+
+```bash
+docker start resume_tailor
+
+cd /home/aditya/dev-work/job_tracker_assistant/jobtracker-BE
+source .venv/bin/activate
+
+python scripts/bootstrap_postgres.py
+uvicorn app.main:app --reload
+```
+
+When `AUTO_MIGRATE=true`, the backend runs `alembic upgrade head` once during startup before serving requests. If the migration fails, startup fails clearly.
+
+### Manual Migration Alternative
+
+Keep this in `jobtracker-BE/.env`:
+
+```text
+AUTO_MIGRATE=false
+```
+
+Then run:
+
+```bash
+cd jobtracker-BE
+source .venv/bin/activate
+alembic upgrade head
 ```
 
 ## Run
 
 ```bash
+cd /home/aditya/dev-work/job_tracker_assistant/jobtracker-BE
+source .venv/bin/activate
 uvicorn app.main:app --reload
 ```
 
 ## Test
 
 ```bash
+cd /home/aditya/dev-work/job_tracker_assistant/jobtracker-BE
+source .venv/bin/activate
 pytest
 ```
 
@@ -228,4 +313,41 @@ For local unpacked Chrome extension development, the backend allows origins matc
 
 ## Scope
 
-This API exposes the Phase 1 tracker CRUD endpoints, the Phase 2 browser-context capture endpoints, and the Phase 3 deterministic transcript parsing endpoints. It does not include AI, voice recording, speech-to-text, CSV import/export, reminders, analytics, Docker, PostgreSQL, timelines, event sourcing, scraping, or metadata inference.
+This API exposes the Phase 1 tracker CRUD endpoints, the Phase 2 browser-context capture endpoints, and the Phase 3 deterministic transcript parsing endpoints. It does not include AI, voice recording, speech-to-text, CSV import/export, reminders, analytics, timelines, event sourcing, scraping, or metadata inference.
+
+## Immediate Adaptation Loop
+
+The current local ASR adaptation loop is:
+
+```text
+transcript input
+    -> /transcript/parse
+    -> structured draft in the frontend
+    -> /applications/create-candidate
+    -> confirmation popup only when the company is genuinely new
+    -> /applications/confirm-company
+    -> application row + canonical company + optional alias + correction event
+    -> /asr/hotwords for later transcription requests
+```
+
+- Existing-company creates and edits keep the low-friction path.
+- New-company creates require backend-confirmed manual company-name confirmation before persistence.
+- Alias creation is exact-and-normalized, not fuzzy.
+- Periodic fine-tuning is not automatically triggered in this phase.
+
+## PostgreSQL Schema
+
+Alembic manages the current required tables:
+
+- `job_applications`
+- `browser_context`
+- `canonical_companies`
+- `company_aliases`
+- `asr_company_correction_events`
+
+## Current Limitations
+
+- SQLite is no longer supported by the backend runtime or tests.
+- Existing SQLite files can remain on disk, but they are not read, written, or migrated automatically.
+- `audio_reference` is nullable metadata only; this backend does not retain audio clips.
+- Training/export review is manual. Correction capture supports later curation, not automatic fine-tuning.
