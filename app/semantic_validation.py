@@ -1,6 +1,9 @@
-from sqlalchemy.orm import Session
+import logging
 
-from .company_resolution import get_application_matches_for_company, resolve_company_name
+from sqlalchemy.orm import Session
+from pydantic import ValidationError
+
+from .company_resolution import detect_explicit_known_companies, get_application_matches_for_company, resolve_company_name
 from .constants import (
     ALLOWED_CURRENT_STAGES,
     ALLOWED_EMPLOYMENT_TYPES,
@@ -9,7 +12,6 @@ from .constants import (
     STATUS_OPTIONS,
 )
 from .models import BrowserContext, JobApplication
-from .role_aliases import canonicalize_role
 from .schemas import JobApplicationCreate, SemanticTranscriptResponse, TranscriptParseRequest
 from .semantic_interpreter import (
     OllamaSemanticInterpreter,
@@ -32,6 +34,9 @@ CLARIFICATION_MISSING_COMPANY = "Which company should I use?"
 CLARIFICATION_MISSING_PERSISTED_TARGET = "Which company's application do you mean?"
 CLARIFICATION_AMBIGUOUS_APPLICATION = "Multiple applications match this company. Specify the role."
 CLARIFICATION_NO_ACTIVE_DRAFT = "There is no active draft to save."
+CLARIFICATION_CONFLICTING_COMPANY = "I found conflicting company names. Which company should I use?"
+CLARIFICATION_MULTIPLE_EXPLICIT_COMPANIES = "I found multiple company names. Which company should I use?"
+logger = logging.getLogger(__name__)
 
 
 def empty_proposal() -> SemanticToolCallProposal:
@@ -57,6 +62,18 @@ def build_context_payload(payload: TranscriptParseRequest) -> dict[str, object]:
     }
 
 
+def build_interpreter_context(
+    db: Session,
+    payload: TranscriptParseRequest,
+) -> tuple[dict[str, object], list[str]]:
+    context = build_context_payload(payload)
+    explicit_known_companies = detect_explicit_known_companies(db, payload.transcript)
+    return (
+        context | {"explicit_known_companies": explicit_known_companies},
+        explicit_known_companies,
+    )
+
+
 def normalize_status(value: str | None) -> str | None:
     if value is None:
         return None
@@ -78,6 +95,10 @@ def _normalize_lookup_text(value: str) -> str:
     return " ".join(value.replace("-", " ").replace("_", " ").strip().casefold().split())
 
 
+def normalize_role_title(value: str) -> str:
+    return " ".join(value.strip().split())
+
+
 EMPLOYMENT_TYPE_ALIASES = {
     "internship": "Internship",
     "full time": "Full Time",
@@ -95,16 +116,23 @@ LOCATION_ALIASES = {
 }
 
 
-def normalize_roles(values: list[str] | None) -> list[str] | None:
+def normalize_roles(values: list[str] | None, *, tool_name: str | None = None) -> list[str] | None:
     if values is None:
         return None
     normalized_values: list[str] = []
     for value in values:
-        canonical_value = canonicalize_role(value)
-        if canonical_value is None:
+        normalized_role_value = normalize_role_title(value)
+        if not normalized_role_value:
+            logger.warning(
+                "semantic_role_validation_failed tool=%s raw_role_value=%r normalized_role_value=%r reason=%r",
+                tool_name,
+                value,
+                normalized_role_value,
+                "blank_role_value",
+            )
             return None
-        if canonical_value not in normalized_values:
-            normalized_values.append(canonical_value)
+        if normalized_role_value not in normalized_values:
+            normalized_values.append(normalized_role_value)
     return normalized_values
 
 
@@ -148,11 +176,11 @@ def normalize_stages(values: list[str] | None) -> list[str] | None:
     return normalized_values
 
 
-def validate_fields(fields: SemanticFieldPatch) -> tuple[SemanticFieldPatch | None, list[str]]:
+def validate_fields(fields: SemanticFieldPatch, *, tool_name: str | None = None) -> tuple[SemanticFieldPatch | None, list[str]]:
     warnings: list[str] = []
     errors: list[str] = []
 
-    roles = normalize_roles(fields.roles)
+    roles = normalize_roles(fields.roles, tool_name=tool_name)
     if fields.roles is not None and roles is None:
         errors.append("Unsupported role value.")
 
@@ -215,7 +243,12 @@ def build_ambiguous_update_question(company: str, matches: list[JobApplication])
 def filter_matches_by_role(matches: list[JobApplication], role: str | None) -> list[JobApplication]:
     if role is None:
         return matches
-    return [application for application in matches if role in application.roles_json]
+    normalized_requested_role = normalize_role_title(role)
+    return [
+        application
+        for application in matches
+        if any(normalize_role_title(existing_role).casefold() == normalized_requested_role.casefold() for existing_role in application.roles_json)
+    ]
 
 
 def resolve_existing_application_target(
@@ -223,7 +256,7 @@ def resolve_existing_application_target(
     target: PreviewExistingApplicationTarget,
     context: dict[str, object],
 ) -> tuple[JobApplication | None, list[str], str | None]:
-    requested_role = canonicalize_role(target.role) if target.role else None
+    requested_role = normalize_role_title(target.role) if target.role else None
     selected_application_id = context.get("active_application_id")
 
     if target.application_id is not None:
@@ -232,7 +265,9 @@ def resolve_existing_application_target(
         application = db.get(JobApplication, target.application_id)
         if application is None:
             return None, ["Referenced application was not found."], None
-        if requested_role and requested_role not in application.roles_json:
+        if requested_role and not any(
+            normalize_role_title(existing_role).casefold() == requested_role.casefold() for existing_role in application.roles_json
+        ):
             return None, ["Referenced application does not match the requested role."], None
         return application, [], None
 
@@ -296,7 +331,8 @@ def build_context_draft(context: dict[str, object]) -> JobApplicationCreate | No
         role_from_context = context.get("active_role")
         active_role = role_from_context if isinstance(role_from_context, str) else None
         company = active_company.strip() if isinstance(active_company, str) else ""
-        roles = [canonicalize_role(active_role)] if active_role and canonicalize_role(active_role) else []
+        normalized_active_role = normalize_role_title(active_role) if active_role else None
+        roles = [normalized_active_role] if normalized_active_role else []
         if not company:
             return None
         return JobApplicationCreate(
@@ -394,7 +430,12 @@ def handle_patch_active_draft(
     arguments: PatchActiveDraftArguments,
     metrics,
 ) -> SemanticTranscriptResponse:
-    validated_fields, warnings = validate_fields(arguments.fields)
+    logger.info(
+        "semantic_tool_arguments_normalized tool=%s arguments=%r",
+        proposal.tool_name,
+        proposal.arguments,
+    )
+    validated_fields, warnings = validate_fields(arguments.fields, tool_name=proposal.tool_name)
     if validated_fields is None:
         return SemanticTranscriptResponse(
             status="unsupported",
@@ -481,7 +522,12 @@ def handle_preview_existing_application_update(
     metrics,
 ) -> SemanticTranscriptResponse:
     context = build_context_payload(payload)
-    validated_fields, warnings = validate_fields(arguments.fields)
+    logger.info(
+        "semantic_tool_arguments_normalized tool=%s arguments=%r",
+        proposal.tool_name,
+        proposal.arguments,
+    )
+    validated_fields, warnings = validate_fields(arguments.fields, tool_name=proposal.tool_name)
     if validated_fields is None:
         return SemanticTranscriptResponse(
             status="unsupported",
@@ -632,12 +678,148 @@ def handle_ask_clarification(
     )
 
 
+def _proposal_with_clarification(question: str) -> SemanticToolCallProposal:
+    return SemanticToolCallProposal(tool_name="ask_clarification", arguments={"question": question})
+
+
+def _normalize_role_alias_value(value: object) -> list[str] | None:
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        normalized = [item.strip() for item in value if item.strip()]
+        return normalized
+    return None
+
+
+def normalize_patch_active_draft_argument_shape(proposal: SemanticToolCallProposal) -> SemanticToolCallProposal:
+    if proposal.tool_name != "patch_active_draft":
+        return proposal
+
+    arguments = dict(proposal.arguments)
+    fields = arguments.get("fields")
+    if not isinstance(fields, dict):
+        return proposal
+
+    normalized_fields = dict(fields)
+    roles_present = "roles" in normalized_fields
+    role_present = "role" in normalized_fields
+    if not roles_present and not role_present:
+        arguments["fields"] = normalized_fields
+        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+
+    normalized_roles = _normalize_role_alias_value(normalized_fields.get("roles")) if roles_present else None
+    normalized_role_alias = _normalize_role_alias_value(normalized_fields.get("role")) if role_present else None
+
+    if roles_present and normalized_roles is None:
+        return proposal
+    if role_present and normalized_role_alias is None:
+        return proposal
+
+    if roles_present and role_present:
+        if normalized_roles != normalized_role_alias:
+            return proposal
+        normalized_fields.pop("role", None)
+        normalized_fields["roles"] = normalized_roles
+        arguments["fields"] = normalized_fields
+        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+
+    if role_present:
+        normalized_fields.pop("role", None)
+        normalized_fields["roles"] = normalized_role_alias
+        arguments["fields"] = normalized_fields
+        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+
+    normalized_fields["roles"] = normalized_roles
+    arguments["fields"] = normalized_fields
+    return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+
+
+def validate_tool_arguments_with_safe_normalization(proposal: SemanticToolCallProposal) -> tuple[SemanticToolCallProposal, object]:
+    normalized_proposal = normalize_patch_active_draft_argument_shape(proposal)
+    if normalized_proposal.tool_name == "patch_active_draft":
+        return normalized_proposal, PatchActiveDraftArguments.model_validate(normalized_proposal.arguments)
+    if normalized_proposal.tool_name == "preview_existing_application_update":
+        return normalized_proposal, PreviewExistingApplicationUpdateArguments.model_validate(normalized_proposal.arguments)
+    if normalized_proposal.tool_name == "request_draft_save":
+        return normalized_proposal, RequestDraftSaveArguments.model_validate(normalized_proposal.arguments)
+    if normalized_proposal.tool_name == "ask_clarification":
+        return normalized_proposal, AskClarificationArguments.model_validate(normalized_proposal.arguments)
+    return normalized_proposal, None
+
+
+def _extract_proposed_company(proposal: SemanticToolCallProposal) -> str | None:
+    if proposal.tool_name == "patch_active_draft":
+        fields = proposal.arguments.get("fields")
+        if isinstance(fields, dict):
+            company = fields.get("company")
+            return company if isinstance(company, str) else None
+        return None
+    if proposal.tool_name == "preview_existing_application_update":
+        target = proposal.arguments.get("target")
+        if isinstance(target, dict):
+            company = target.get("company")
+            return company if isinstance(company, str) else None
+        return None
+    return None
+
+
+def _with_reconciled_company(proposal: SemanticToolCallProposal, company: str) -> SemanticToolCallProposal:
+    arguments = dict(proposal.arguments)
+    if proposal.tool_name == "patch_active_draft":
+        fields = dict(arguments.get("fields") or {})
+        fields["company"] = company
+        arguments["fields"] = fields
+        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+    if proposal.tool_name == "preview_existing_application_update":
+        target = dict(arguments.get("target") or {})
+        target["company"] = company
+        arguments["target"] = target
+        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+    return proposal
+
+
+def reconcile_explicit_company_candidates(
+    db: Session,
+    proposal: SemanticToolCallProposal,
+    explicit_known_companies: list[str],
+) -> SemanticToolCallProposal:
+    if len(explicit_known_companies) > 1:
+        return _proposal_with_clarification(CLARIFICATION_MULTIPLE_EXPLICIT_COMPANIES)
+
+    if len(explicit_known_companies) != 1:
+        return proposal
+
+    candidate = explicit_known_companies[0]
+    if proposal.tool_name not in {"patch_active_draft", "preview_existing_application_update", "ask_clarification"}:
+        return proposal
+
+    proposed_company = _extract_proposed_company(proposal)
+    if proposal.tool_name == "ask_clarification":
+        question = proposal.arguments.get("question")
+        if question == CLARIFICATION_MISSING_COMPANY:
+            return proposal
+        return proposal
+
+    if proposed_company is None:
+        return _with_reconciled_company(proposal, candidate)
+
+    resolved_company_name, _canonical_company = resolve_company_name(db, proposed_company)
+    if resolved_company_name == candidate:
+        return _with_reconciled_company(proposal, candidate)
+    if resolved_company_name is None and proposed_company.strip() == candidate:
+        return _with_reconciled_company(proposal, candidate)
+    if resolved_company_name is None:
+        return _proposal_with_clarification(CLARIFICATION_CONFLICTING_COMPANY)
+    return _proposal_with_clarification(CLARIFICATION_CONFLICTING_COMPANY)
+
+
 def interpret_transcript_command(
     db: Session,
     payload: TranscriptParseRequest,
     interpreter: OllamaSemanticInterpreter,
 ) -> SemanticTranscriptResponse:
-    context = build_context_payload(payload)
+    context, explicit_known_companies = build_interpreter_context(db, payload)
     try:
         interpretation = interpreter.interpret(payload.transcript, context)
     except SemanticInterpreterUnavailableError as exc:
@@ -657,22 +839,105 @@ def interpret_transcript_command(
             warnings=[str(exc)],
         )
 
-    proposal = interpretation.proposal
+    logger.info(
+        "semantic_raw_ollama_tool_call tool=%s arguments=%r",
+        interpretation.proposal.tool_name,
+        interpretation.proposal.arguments,
+    )
+    proposal = reconcile_explicit_company_candidates(db, interpretation.proposal, explicit_known_companies)
     metrics = interpretation.metrics
 
+    if (
+        proposal.tool_name == "ask_clarification"
+        and proposal.arguments.get("question") == CLARIFICATION_MISSING_COMPANY
+        and len(explicit_known_companies) == 1
+    ):
+        retry_context = context | {
+            "explicit_company_retry_hint": (
+                f'Exactly one explicit known company appears in the current utterance: "{explicit_known_companies[0]}". '
+                "Do not ask which company to use. Use that company if the selected tool accepts a company field."
+            )
+        }
+        try:
+            retry_interpretation = interpreter.interpret(payload.transcript, retry_context)
+        except (SemanticInterpreterUnavailableError, SemanticInterpreterInvalidResponseError):
+            retry_interpretation = None
+        if retry_interpretation is not None:
+            proposal = reconcile_explicit_company_candidates(db, retry_interpretation.proposal, explicit_known_companies)
+            metrics = retry_interpretation.metrics
+
+    try:
+        proposal, validated_arguments = validate_tool_arguments_with_safe_normalization(proposal)
+        logger.info(
+            "semantic_post_schema_repair_arguments tool=%s arguments=%r",
+            proposal.tool_name,
+            proposal.arguments,
+        )
+    except ValidationError as exc:
+        logger.warning(
+            "semantic_tool_argument_validation_failed tool=%s arguments=%r reason=%r",
+            proposal.tool_name,
+            proposal.arguments,
+            exc.errors(),
+        )
+        validated_arguments = None
+        if proposal.tool_name == "patch_active_draft":
+            retry_context = context | {
+                "schema_repair_retry_hint": (
+                    "Your previous tool arguments were invalid. Use the existing patch_active_draft schema. "
+                    "Put company in fields.company. Put one or more roles in fields.roles as a JSON array of strings. "
+                    "Do not use fields.role unless you are mirroring the same value into fields.roles."
+                )
+            }
+            try:
+                retry_interpretation = interpreter.interpret(payload.transcript, retry_context)
+            except (SemanticInterpreterUnavailableError, SemanticInterpreterInvalidResponseError):
+                retry_interpretation = None
+            if retry_interpretation is not None:
+                logger.info(
+                    "semantic_raw_ollama_tool_call tool=%s arguments=%r",
+                    retry_interpretation.proposal.tool_name,
+                    retry_interpretation.proposal.arguments,
+                )
+                proposal = reconcile_explicit_company_candidates(db, retry_interpretation.proposal, explicit_known_companies)
+                metrics = retry_interpretation.metrics
+                try:
+                    proposal, validated_arguments = validate_tool_arguments_with_safe_normalization(proposal)
+                    logger.info(
+                        "semantic_post_schema_repair_arguments tool=%s arguments=%r",
+                        proposal.tool_name,
+                        proposal.arguments,
+                    )
+                except ValidationError:
+                    return SemanticTranscriptResponse(
+                        status="unsupported",
+                        operation="none",
+                        raw_transcript=payload.transcript,
+                        proposal=empty_proposal(),
+                        warnings=["Local language interpreter returned invalid tool arguments. No tracker changes were saved."],
+                    )
+        if validated_arguments is None:
+            return SemanticTranscriptResponse(
+                status="unsupported",
+                operation="none",
+                raw_transcript=payload.transcript,
+                proposal=empty_proposal(),
+                warnings=["Local language interpreter returned invalid tool arguments. No tracker changes were saved."],
+            )
+
     if proposal.tool_name == "patch_active_draft":
-        arguments = PatchActiveDraftArguments.model_validate(proposal.arguments)
+        arguments = validated_arguments
         return handle_patch_active_draft(db, payload, proposal, arguments, metrics)
     if proposal.tool_name == "preview_existing_application_update":
-        arguments = PreviewExistingApplicationUpdateArguments.model_validate(proposal.arguments)
+        arguments = validated_arguments
         return handle_preview_existing_application_update(db, payload, proposal, arguments, metrics)
     if proposal.tool_name == "request_draft_save":
-        arguments = RequestDraftSaveArguments.model_validate(proposal.arguments)
+        arguments = validated_arguments
         return handle_request_draft_save(payload, proposal, arguments, metrics)
     if proposal.tool_name == "attach_latest_browser_context":
         return handle_attach_latest_browser_context(db, payload, proposal, metrics)
     if proposal.tool_name == "ask_clarification":
-        arguments = AskClarificationArguments.model_validate(proposal.arguments)
+        arguments = validated_arguments
         return handle_ask_clarification(payload, proposal, arguments, metrics)
 
     return SemanticTranscriptResponse(

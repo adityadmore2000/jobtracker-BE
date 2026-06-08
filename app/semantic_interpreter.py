@@ -77,6 +77,9 @@ def get_ollama_settings() -> OllamaSettings:
 
 def build_ollama_messages(transcript: str, context: dict[str, object] | None) -> list[dict[str, str]]:
     normalized_context = context or {}
+    explicit_known_companies = normalized_context.get("explicit_known_companies")
+    retry_hint = normalized_context.get("explicit_company_retry_hint")
+    schema_repair_retry_hint = normalized_context.get("schema_repair_retry_hint")
     return [
         {
             "role": "system",
@@ -88,6 +91,9 @@ def build_ollama_messages(transcript: str, context: dict[str, object] | None) ->
                 "Partial unsaved drafts are valid and should usually use patch_active_draft. "
                 "Do not ask for missing draft fields immediately. Patch only fields explicitly mentioned by the user. "
                 "A company-like name near words such as application, company, opening, job, role, apply, track, or add should usually be treated as company. "
+                "A company name may appear anywhere in the user's sentence. "
+                "When exactly one explicit known company is listed for the current utterance, treat it as the company mentioned by the user. "
+                "Do not ask \"Which company should I use?\" when exactly one explicit company is already present. "
                 "Unknown company names are valid during draft creation. "
                 "Use preview_existing_application_update only for an already persisted application. "
                 "That tool requires either an explicit company in the user utterance or an explicit persisted application_id selected in UI context. "
@@ -95,14 +101,25 @@ def build_ollama_messages(transcript: str, context: dict[str, object] | None) ->
                 "Use request_draft_save only when there is an active unsaved draft. "
                 "Use attach_latest_browser_context only for the active unsaved draft and never to target a persisted row. "
                 "Use ask_clarification only when genuinely needed. "
+                "Company and role may appear in any natural order. "
+                "Extract the company into fields.company. "
+                "Extract one or more roles into fields.roles. "
+                "Extract only the role value. Do not include connector words such as \"for\". "
+                "Do not include the label word \"role\" inside the role value unless it is genuinely part of the title. "
+                "For list-valued fields such as roles and employment_types, always emit JSON arrays. "
                 "Examples: "
                 "\"I want to add an application Neilsoft\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\"},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
                 "\"Add a Neilsoft application\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\"},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
                 "\"Neilsoft sathi application add kar\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\"},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
+                "\"AI Engineer role for Neilsoft\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\",\"roles\":[\"AI Engineer\"]},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
+                "\"Role at Neilsoft for AI Engineer\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\",\"roles\":[\"AI Engineer\"]},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
+                "\"At Neilsoft, role is AI Engineer\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\",\"roles\":[\"AI Engineer\"]},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
+                "\"For Neilsoft, set role to AI Engineer\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\",\"roles\":[\"AI Engineer\"]},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
+                "\"Neilsoft sathi AI Engineer role\" -> patch_active_draft({\"fields\":{\"company\":\"Neilsoft\",\"roles\":[\"AI Engineer\"]},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
                 "\"AI Engineer role\" with active unsaved draft -> patch_active_draft({\"fields\":{\"roles\":[\"AI Engineer\"]},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
                 "\"fulltime ani onsite\" with active unsaved draft -> patch_active_draft({\"fields\":{\"employment_types\":[\"Full Time\"],\"location\":\"onsite\"},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
-                "\"Applied stage thev\" with active unsaved draft -> patch_active_draft({\"fields\":{\"current_stages\":[\"Applied\"]},\"replace_explicit_fields\":true,\"context_notes\":[]}). "
                 "\"Neilsoft high priority kar\" -> preview_existing_application_update({\"target\":{\"company\":\"Neilsoft\"},\"fields\":{\"priority\":\"HIGH\"},\"replace_explicit_fields\":true}). "
+                "\"Update Neilsoft priority to high\" -> preview_existing_application_update({\"target\":{\"company\":\"Neilsoft\"},\"fields\":{\"priority\":\"HIGH\"},\"replace_explicit_fields\":true}). "
                 "\"Make it high priority\" without explicit company and without selected persisted row -> ask_clarification({\"question\":\"Which company's application do you mean?\"}). "
                 "\"Add application\" without company and without active draft -> ask_clarification({\"question\":\"Which company should I use?\"}). "
                 "\"save it\" with active draft -> request_draft_save({}). "
@@ -115,6 +132,9 @@ def build_ollama_messages(transcript: str, context: dict[str, object] | None) ->
                 {
                     "transcript": transcript,
                     "session_context": normalized_context,
+                    "explicit_known_companies_in_current_utterance": explicit_known_companies if isinstance(explicit_known_companies, list) else [],
+                    "retry_hint": retry_hint if isinstance(retry_hint, str) else None,
+                    "schema_repair_retry_hint": schema_repair_retry_hint if isinstance(schema_repair_retry_hint, str) else None,
                     "instruction": "Select exactly one backend tool call for this utterance.",
                 },
                 ensure_ascii=False,
@@ -132,7 +152,11 @@ def build_ollama_tools() -> list[dict[str, object]]:
                 "description": (
                     "Use this when the user provides any partial or complete information for a new or currently unsaved application draft. "
                     "Partial drafts are valid. Do not ask for missing fields immediately. Patch only fields explicitly mentioned by the user. "
+                    "A company name may appear anywhere in the sentence, and explicit known companies from the current utterance should be used as company when exactly one is present. "
                     "A company-like name near words such as application, company, opening, job, role, apply, track, or add should normally be treated as company. "
+                    "Company and role may appear in any natural order. Extract company into fields.company and one or more roles into fields.roles. "
+                    "Extract only the role value and do not include connector words like \"for\" or the label word \"role\" unless it is genuinely part of the title. "
+                    "For list-valued fields such as roles and employment_types, always emit JSON arrays. "
                     "Unknown company names are valid during draft creation."
                 ),
                 "parameters": PatchActiveDraftArguments.model_json_schema(),
@@ -145,6 +169,7 @@ def build_ollama_tools() -> list[dict[str, object]]:
                 "description": (
                     "Use this only for an already persisted application. "
                     "Require either explicit company from the user utterance or an explicitly selected persisted application_id from UI context. "
+                    "When exactly one explicit known company is listed for the current utterance, use it as the company target. "
                     "Do not infer a persisted-row target from active draft context, recent actions, or vague pronouns alone."
                 ),
                 "parameters": PreviewExistingApplicationUpdateArguments.model_json_schema(),
@@ -224,14 +249,7 @@ def _extract_tool_call(payload: dict[str, object]) -> SemanticToolCallProposal:
         raise SemanticInterpreterInvalidResponseError("Local language interpreter returned an unknown tool call. No tracker changes were saved.")
 
     arguments = _parse_tool_arguments(function_payload.get("arguments", {}))
-    try:
-        validated_arguments = TOOL_ARGUMENT_MODELS[name].model_validate(arguments)
-    except Exception as exc:
-        raise SemanticInterpreterInvalidResponseError(
-            "Local language interpreter returned invalid tool arguments. No tracker changes were saved."
-        ) from exc
-
-    return SemanticToolCallProposal(tool_name=name, arguments=validated_arguments.model_dump())
+    return SemanticToolCallProposal(tool_name=name, arguments=arguments)
 
 
 class OllamaSemanticInterpreter:

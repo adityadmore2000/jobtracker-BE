@@ -8,6 +8,7 @@ from app.semantic_interpreter import (
     OllamaSemanticInterpreter,
     SemanticInterpreterInvalidResponseError,
     SemanticInterpreterUnavailableError,
+    build_ollama_messages,
     get_ollama_settings,
 )
 
@@ -58,7 +59,10 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
     monkeypatch.setattr(semantic_interpreter.httpx, "post", fake_post)
 
     interpreter = OllamaSemanticInterpreter()
-    result = interpreter.interpret("Add AI Engineer role for Neilsoft", {"recent_actions": ["x"]})
+    result = interpreter.interpret(
+        "Add AI Engineer role for Neilsoft",
+        {"recent_actions": ["x"], "explicit_known_companies": ["Neilsoft"]},
+    )
 
     assert result.proposal.tool_name == "patch_active_draft"
     assert captured["url"] == "http://127.0.0.1:11434/api/chat"
@@ -67,7 +71,10 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
     assert captured["json"]["stream"] is False
     assert captured["json"]["messages"][1]["content"]
     assert "I want to add an application Neilsoft" in captured["json"]["messages"][0]["content"]
+    assert "AI Engineer role for Neilsoft" in captured["json"]["messages"][0]["content"]
     assert "Which company's application do you mean?" in captured["json"]["messages"][0]["content"]
+    assert "Do not ask \"Which company should I use?\" when exactly one explicit company is already present." in captured["json"]["messages"][0]["content"]
+    assert '"explicit_known_companies_in_current_utterance": ["Neilsoft"]' in captured["json"]["messages"][1]["content"]
     assert captured["json"]["tools"]
     assert {tool["function"]["name"] for tool in captured["json"]["tools"]} == {
         "patch_active_draft",
@@ -77,6 +84,35 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
         "ask_clarification",
     }
     assert "format" not in captured["json"]
+
+
+def test_build_ollama_messages_includes_retry_hint_and_explicit_companies() -> None:
+    messages = build_ollama_messages(
+        "AI Engineer role for Neilsoft",
+        {
+            "explicit_known_companies": ["Neilsoft"],
+            "explicit_company_retry_hint": "Use Neilsoft instead of asking for company clarification.",
+        },
+    )
+
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert "For list-valued fields such as roles and employment_types, always emit JSON arrays." in messages[0]["content"]
+    assert "Company and role may appear in any natural order." in messages[0]["content"]
+    assert "Role at Neilsoft for AI Engineer" in messages[0]["content"]
+    assert "Do not include connector words such as \"for\"" in messages[0]["content"]
+    assert "Do not include the label word \"role\" inside the role value" in messages[0]["content"]
+    assert '"explicit_known_companies_in_current_utterance": ["Neilsoft"]' in messages[1]["content"]
+    assert '"retry_hint": "Use Neilsoft instead of asking for company clarification."' in messages[1]["content"]
+
+
+def test_build_ollama_messages_includes_schema_repair_retry_hint() -> None:
+    messages = build_ollama_messages(
+        "Role at Neilsoft for AI Engineer",
+        {"schema_repair_retry_hint": "Use fields.roles as a JSON array of strings."},
+    )
+
+    assert '"schema_repair_retry_hint": "Use fields.roles as a JSON array of strings."' in messages[1]["content"]
 
 
 def test_ollama_settings_are_loaded_from_backend_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

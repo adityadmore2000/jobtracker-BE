@@ -8,7 +8,6 @@ from .constants import (
     ALLOWED_EMPLOYMENT_TYPES,
     ALLOWED_LOCATIONS,
     ALLOWED_PRIORITIES,
-    ALLOWED_ROLES,
     STATUS_OPTIONS,
 )
 from .semantic_schemas import SemanticInterpreterMetrics, SemanticToolCallProposal
@@ -29,6 +28,22 @@ def validate_optional_allowed(value: str, allowed: list[str], field_name: str) -
         allowed_values = ", ".join(allowed)
         raise ValueError(f"{field_name} must be empty or one of: {allowed_values}")
     return value
+
+
+def normalize_role_title(value: str) -> str:
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        raise ValueError("roles_json must contain non-blank strings")
+    return normalized
+
+
+def validate_role_titles(values: list[str], field_name: str) -> list[str]:
+    normalized_values = [normalize_role_title(value) for value in values]
+    deduplicated: list[str] = []
+    for value in normalized_values:
+        if value not in deduplicated:
+            deduplicated.append(value)
+    return deduplicated
 
 
 def normalize_string(value: Any) -> Any:
@@ -58,8 +73,8 @@ class JobApplicationBase(BaseModel):
 
     @field_validator("roles_json")
     @classmethod
-    def roles_are_allowed(cls, values: list[str]) -> list[str]:
-        return validate_allowed_list(values, ALLOWED_ROLES, "roles_json")
+    def roles_are_titles(cls, values: list[str]) -> list[str]:
+        return validate_role_titles(values, "roles_json")
 
     @field_validator("employment_types_json")
     @classmethod
@@ -146,8 +161,8 @@ class JobApplicationUpdate(BaseModel):
 
     @field_validator("roles_json")
     @classmethod
-    def roles_are_allowed(cls, values: list[str] | None) -> list[str] | None:
-        return None if values is None else validate_allowed_list(values, ALLOWED_ROLES, "roles_json")
+    def roles_are_titles(cls, values: list[str] | None) -> list[str] | None:
+        return None if values is None else validate_role_titles(values, "roles_json")
 
     @field_validator("employment_types_json")
     @classmethod
