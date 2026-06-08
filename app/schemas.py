@@ -225,6 +225,26 @@ class BrowserContextResponse(BaseModel):
     context: BrowserContextRead | None
 
 
+class LiveKitTokenRequest(BaseModel):
+    room_name: str = "job-tracker-local"
+
+    @field_validator("room_name", mode="before")
+    @classmethod
+    def normalize_room_name(cls, value: str | None) -> str:
+        if value is None:
+            return "job-tracker-local"
+        stripped = value.strip()
+        return stripped or "job-tracker-local"
+
+
+class LiveKitTokenResponse(BaseModel):
+    url: str
+    room_name: str
+    participant_identity: str
+    access_token: str
+    expires_at: datetime
+
+
 class ApplicationCreateCandidateRequiresConfirmation(BaseModel):
     status: Literal["confirmation_required"]
     requires_confirmation: Literal[True] = True

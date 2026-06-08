@@ -1,8 +1,11 @@
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from livekit.api import AccessToken, VideoGrants
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -22,18 +25,21 @@ from .constants import (
     STATUS_OPTIONS,
 )
 from .database import get_db
+from .livekit_config import LiveKitConfigurationError, get_livekit_settings
 from .migrations import run_startup_migrations_if_enabled
 from .models import AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, CompanyAlias, JobApplication
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
     ApplicationCreateCandidateRequest,
     ApplicationCreateCandidateResponse,
+    AsrHotwordsResponse,
     BrowserContextCreate,
     BrowserContextResponse,
-    AsrHotwordsResponse,
     JobApplicationCreate,
     JobApplicationRead,
     JobApplicationUpdate,
+    LiveKitTokenRequest,
+    LiveKitTokenResponse,
     SemanticTranscriptResponse,
     TranscriptParseRequest,
 )
@@ -49,6 +55,8 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Job Tracker API", lifespan=lifespan)
 HOTWORD_LIMIT = 100
+DEFAULT_LIVEKIT_ROOM_NAME = "job-tracker-local"
+LIVEKIT_BROWSER_TOKEN_TTL = timedelta(minutes=15)
 STATIC_HOTWORDS = [
     *ALLOWED_ROLES,
     *ALLOWED_EMPLOYMENT_TYPES,
@@ -153,6 +161,28 @@ def build_hotword_list(db: Session, limit: int = HOTWORD_LIMIT) -> list[str]:
     return hotwords[:limit]
 
 
+def create_livekit_browser_token(room_name: str, participant_identity: str) -> tuple[str, datetime, str]:
+    settings = get_livekit_settings()
+    expires_at = datetime.now(timezone.utc) + LIVEKIT_BROWSER_TOKEN_TTL
+    access_token = (
+        AccessToken(settings.api_key, settings.api_secret)
+        .with_identity(participant_identity)
+        .with_ttl(LIVEKIT_BROWSER_TOKEN_TTL)
+        .with_grants(
+            VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=True,
+                can_publish_sources=["microphone"],
+            )
+        )
+        .to_jwt()
+    )
+    return access_token, expires_at, settings.url
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -171,6 +201,23 @@ async def list_applications(db: Session = Depends(get_db)) -> list[JobApplicatio
 @app.get("/asr/hotwords", response_model=AsrHotwordsResponse)
 async def get_asr_hotwords(db: Session = Depends(get_db)) -> AsrHotwordsResponse:
     return AsrHotwordsResponse(hotwords=build_hotword_list(db), limit=HOTWORD_LIMIT)
+
+
+@app.post("/livekit/token", response_model=LiveKitTokenResponse)
+async def create_livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
+    participant_identity = f"browser-{uuid4()}"
+    try:
+        access_token, expires_at, url = create_livekit_browser_token(payload.room_name, participant_identity)
+    except LiveKitConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    return LiveKitTokenResponse(
+        url=url,
+        room_name=payload.room_name,
+        participant_identity=participant_identity,
+        access_token=access_token,
+        expires_at=expires_at,
+    )
 
 
 @app.post("/browser-context", response_model=BrowserContextResponse, status_code=status.HTTP_201_CREATED)
