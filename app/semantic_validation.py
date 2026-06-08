@@ -24,6 +24,7 @@ from .semantic_schemas import (
     PreviewExistingApplicationTarget,
     PreviewExistingApplicationUpdateArguments,
     RequestDraftSaveArguments,
+    SemanticExtractedFields,
     SemanticFieldPatch,
     SemanticToolCallProposal,
 )
@@ -38,9 +39,30 @@ CLARIFICATION_CONFLICTING_COMPANY = "I found conflicting company names. Which co
 CLARIFICATION_MULTIPLE_EXPLICIT_COMPANIES = "I found multiple company names. Which company should I use?"
 logger = logging.getLogger(__name__)
 
+_MISSING = object()
+_INVALID = object()
+_CONFLICT = object()
+
 
 def empty_proposal() -> SemanticToolCallProposal:
     return SemanticToolCallProposal()
+
+
+def unsupported_response(
+    payload: TranscriptParseRequest,
+    warnings: list[str],
+    *,
+    proposal: SemanticToolCallProposal | None = None,
+    metrics=None,
+) -> SemanticTranscriptResponse:
+    return SemanticTranscriptResponse(
+        status="unsupported",
+        operation="none",
+        raw_transcript=payload.transcript,
+        proposal=proposal or empty_proposal(),
+        warnings=warnings,
+        interpreter_metrics=metrics,
+    )
 
 
 def build_context_payload(payload: TranscriptParseRequest) -> dict[str, object]:
@@ -77,9 +99,9 @@ def build_interpreter_context(
 def normalize_status(value: str | None) -> str | None:
     if value is None:
         return None
-    normalized = value.strip().casefold()
+    normalized = _normalize_lookup_text(value)
     for option in STATUS_OPTIONS:
-        if option.casefold() == normalized:
+        if _normalize_lookup_text(option) == normalized:
             return option
     return None
 
@@ -87,6 +109,17 @@ def normalize_status(value: str | None) -> str | None:
 def normalize_priority(value: str | None) -> str | None:
     if value is None:
         return None
+    normalized = _normalize_lookup_text(value)
+    if normalized.endswith(" priority"):
+        normalized = normalized[: -len(" priority")].strip()
+    priority_aliases = {
+        "low": "LOW",
+        "medium": "MEDIUM",
+        "high": "HIGH",
+    }
+    canonical_priority = priority_aliases.get(normalized)
+    if canonical_priority is not None:
+        return canonical_priority
     normalized = value.strip().upper()
     return normalized if normalized in ALLOWED_PRIORITIES else None
 
@@ -99,8 +132,21 @@ def normalize_role_title(value: str) -> str:
     return " ".join(value.strip().split())
 
 
+def normalize_role_boundary_noise(value: str) -> str:
+    normalized = normalize_role_title(value)
+    if not normalized:
+        return ""
+    words = normalized.split()
+    if words and words[0].casefold() == "for":
+        words = words[1:]
+    if words and words[-1].casefold() == "role":
+        words = words[:-1]
+    return " ".join(words)
+
+
 EMPLOYMENT_TYPE_ALIASES = {
     "internship": "Internship",
+    "intern": "Internship",
     "full time": "Full Time",
     "fulltime": "Full Time",
     "part time": "Part Time",
@@ -109,6 +155,8 @@ EMPLOYMENT_TYPE_ALIASES = {
 
 LOCATION_ALIASES = {
     "remote": "remote",
+    "work from home": "remote",
+    "wfh": "remote",
     "hybrid": "hybrid",
     "onsite": "onsite",
     "on site": "onsite",
@@ -121,7 +169,7 @@ def normalize_roles(values: list[str] | None, *, tool_name: str | None = None) -
         return None
     normalized_values: list[str] = []
     for value in values:
-        normalized_role_value = normalize_role_title(value)
+        normalized_role_value = normalize_role_boundary_noise(value)
         if not normalized_role_value:
             logger.warning(
                 "semantic_role_validation_failed tool=%s raw_role_value=%r normalized_role_value=%r reason=%r",
@@ -227,6 +275,13 @@ def validate_fields(fields: SemanticFieldPatch, *, tool_name: str | None = None)
             comments=fields.comments,
         ),
         warnings,
+    )
+
+
+def normalize_extracted_fields(fields: SemanticExtractedFields) -> tuple[SemanticFieldPatch | None, list[str]]:
+    return validate_fields(
+        SemanticFieldPatch.model_validate(fields.model_dump(exclude_none=True)),
+        tool_name="semantic_field_extraction",
     )
 
 
@@ -682,57 +737,321 @@ def _proposal_with_clarification(question: str) -> SemanticToolCallProposal:
     return SemanticToolCallProposal(tool_name="ask_clarification", arguments={"question": question})
 
 
-def _normalize_role_alias_value(value: object) -> list[str] | None:
+def _normalize_optional_text_value(value: object) -> object:
+    if not isinstance(value, str):
+        return _INVALID
+    stripped = value.strip()
+    return stripped if stripped else _INVALID
+
+
+def _normalize_company_value(value: object) -> object:
+    if not isinstance(value, str):
+        return _INVALID
+    stripped = value.strip()
+    return stripped if stripped else _INVALID
+
+
+def _normalize_role_values(value: object) -> object:
     if isinstance(value, str):
-        stripped = value.strip()
-        return [stripped] if stripped else []
-    if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        normalized = [item.strip() for item in value if item.strip()]
-        return normalized
-    return None
+        raw_values = [value]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        raw_values = value
+    else:
+        return _INVALID
+
+    normalized_values: list[str] = []
+    for raw_value in raw_values:
+        normalized = normalize_role_boundary_noise(raw_value)
+        if not normalized:
+            return _INVALID
+        if normalized not in normalized_values:
+            normalized_values.append(normalized)
+    return normalized_values
+
+
+def _normalize_employment_type_values(value: object) -> object:
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        raw_values = value
+    else:
+        return _INVALID
+
+    normalized_values: list[str] = []
+    for raw_value in raw_values:
+        stripped = " ".join(raw_value.strip().split())
+        if not stripped:
+            return _INVALID
+        canonical_value = EMPLOYMENT_TYPE_ALIASES.get(_normalize_lookup_text(stripped), stripped)
+        if canonical_value not in normalized_values:
+            normalized_values.append(canonical_value)
+    return normalized_values
+
+
+def _normalize_stage_values(value: object) -> object:
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        raw_values = value
+    else:
+        return _INVALID
+
+    normalized_values: list[str] = []
+    for raw_value in raw_values:
+        stripped = " ".join(raw_value.strip().split())
+        if not stripped:
+            return _INVALID
+        normalized_lookup = _normalize_lookup_text(stripped)
+        canonical_value = next(
+            (option for option in ALLOWED_CURRENT_STAGES if _normalize_lookup_text(option) == normalized_lookup),
+            stripped,
+        )
+        if canonical_value not in normalized_values:
+            normalized_values.append(canonical_value)
+    return normalized_values
+
+
+def _normalize_status_value(value: object) -> object:
+    if not isinstance(value, str):
+        return _INVALID
+    stripped = " ".join(value.strip().split())
+    if not stripped:
+        return _INVALID
+    return normalize_status(stripped) or stripped
+
+
+def _normalize_priority_value(value: object) -> object:
+    if not isinstance(value, str):
+        return _INVALID
+    stripped = " ".join(value.strip().split())
+    if not stripped:
+        return _INVALID
+    return normalize_priority(stripped) or stripped
+
+
+def _normalize_location_value(value: object) -> object:
+    if not isinstance(value, str):
+        return _INVALID
+    stripped = " ".join(value.strip().split())
+    if not stripped:
+        return _INVALID
+    return normalize_location(stripped) or stripped
+
+
+def _values_conflict(left: object, right: object) -> bool:
+    return left != right
+
+
+def _merge_field_aliases(
+    normalized_fields: dict[str, object],
+    canonical_key: str,
+    alias_keys: tuple[str, ...],
+    normalizer,
+) -> object:
+    present_keys = [key for key in (canonical_key, *alias_keys) if key in normalized_fields]
+    if not present_keys:
+        return _MISSING
+
+    normalized_values: dict[str, object] = {}
+    for key in present_keys:
+        normalized_value = normalizer(normalized_fields[key])
+        if normalized_value is _INVALID:
+            return _INVALID
+        normalized_values[key] = normalized_value
+
+    merged_value = normalized_values[present_keys[0]]
+    for key in present_keys[1:]:
+        if _values_conflict(merged_value, normalized_values[key]):
+            return _CONFLICT
+
+    normalized_fields[canonical_key] = merged_value
+    for alias_key in alias_keys:
+        normalized_fields.pop(alias_key, None)
+    return merged_value
+
+
+def normalize_semantic_field_patch_argument_shape(fields: dict[str, object]) -> dict[str, object] | None:
+    normalized_fields = dict(fields)
+
+    alias_merge_specs = (
+        ("roles", ("role",), _normalize_role_values),
+        ("employment_types", ("employment_type", "type"), _normalize_employment_type_values),
+        ("current_stages", ("current_stage", "stage"), _normalize_stage_values),
+    )
+    for canonical_key, alias_keys, normalizer in alias_merge_specs:
+        merged = _merge_field_aliases(normalized_fields, canonical_key, alias_keys, normalizer)
+        if merged is _INVALID or merged is _CONFLICT:
+            return None
+
+    scalar_normalizers = {
+        "company": _normalize_company_value,
+        "status": _normalize_status_value,
+        "priority": _normalize_priority_value,
+        "location": _normalize_location_value,
+        "comments": _normalize_optional_text_value,
+        "next_action": _normalize_optional_text_value,
+    }
+    for key, normalizer in scalar_normalizers.items():
+        if key not in normalized_fields:
+            continue
+        normalized_value = normalizer(normalized_fields[key])
+        if normalized_value is _INVALID:
+            return None
+        normalized_fields[key] = normalized_value
+
+    return normalized_fields
 
 
 def normalize_patch_active_draft_argument_shape(proposal: SemanticToolCallProposal) -> SemanticToolCallProposal:
-    if proposal.tool_name != "patch_active_draft":
+    if proposal.tool_name not in {"patch_active_draft", "preview_existing_application_update"}:
         return proposal
 
     arguments = dict(proposal.arguments)
     fields = arguments.get("fields")
     if not isinstance(fields, dict):
         return proposal
-
-    normalized_fields = dict(fields)
-    roles_present = "roles" in normalized_fields
-    role_present = "role" in normalized_fields
-    if not roles_present and not role_present:
-        arguments["fields"] = normalized_fields
-        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
-
-    normalized_roles = _normalize_role_alias_value(normalized_fields.get("roles")) if roles_present else None
-    normalized_role_alias = _normalize_role_alias_value(normalized_fields.get("role")) if role_present else None
-
-    if roles_present and normalized_roles is None:
+    normalized_fields = normalize_semantic_field_patch_argument_shape(fields)
+    if normalized_fields is None:
         return proposal
-    if role_present and normalized_role_alias is None:
-        return proposal
-
-    if roles_present and role_present:
-        if normalized_roles != normalized_role_alias:
-            return proposal
-        normalized_fields.pop("role", None)
-        normalized_fields["roles"] = normalized_roles
-        arguments["fields"] = normalized_fields
-        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
-
-    if role_present:
-        normalized_fields.pop("role", None)
-        normalized_fields["roles"] = normalized_role_alias
-        arguments["fields"] = normalized_fields
-        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
-
-    normalized_fields["roles"] = normalized_roles
     arguments["fields"] = normalized_fields
     return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+
+
+def _safe_extracted_field_log(fields: dict[str, object]) -> dict[str, object]:
+    safe_payload: dict[str, object] = {}
+    for key, value in fields.items():
+        if key in {"comments", "next_action"}:
+            safe_payload[f"{key}_present"] = isinstance(value, str) and bool(value)
+        else:
+            safe_payload[key] = value
+    return safe_payload
+
+
+def _canonicalize_company_for_comparison(db: Session, value: str) -> str:
+    resolved_company_name, _canonical_company = resolve_company_name(db, value)
+    return resolved_company_name or value.strip()
+
+
+def _canonicalize_selected_field_value(field_name: str, raw_value: object) -> object:
+    normalized_fields = normalize_semantic_field_patch_argument_shape({field_name: raw_value})
+    if normalized_fields is None or field_name not in normalized_fields:
+        return _INVALID
+    try:
+        semantic_field_patch = SemanticFieldPatch.model_validate(normalized_fields)
+    except ValidationError:
+        return _INVALID
+    validated_fields, _warnings = validate_fields(semantic_field_patch, tool_name="semantic_tool_selection")
+    if validated_fields is None:
+        return _INVALID
+    canonical_payload = validated_fields.model_dump(exclude_none=True)
+    return canonical_payload.get(field_name, _INVALID)
+
+
+def _log_field_conflict(
+    *,
+    proposal: SemanticToolCallProposal,
+    field_name: str,
+    normalized_extracted_value: object,
+    normalized_selected_tool_value: object,
+) -> None:
+    logger.warning(
+        "semantic_extracted_fields_conflict tool=%s field_name=%s normalized_extracted_value=%r normalized_selected_tool_value=%r",
+        proposal.tool_name,
+        field_name,
+        normalized_extracted_value,
+        normalized_selected_tool_value,
+    )
+
+
+def merge_extracted_fields_into_proposal(
+    db: Session,
+    proposal: SemanticToolCallProposal,
+    extracted_fields: SemanticFieldPatch,
+) -> SemanticToolCallProposal | None:
+    extracted_payload = extracted_fields.model_dump(exclude_none=True)
+    if not extracted_payload:
+        return proposal
+
+    if proposal.tool_name == "patch_active_draft":
+        arguments = dict(proposal.arguments)
+        fields = dict(arguments.get("fields") or {})
+        merged_fields = dict(extracted_payload)
+
+        if "company" not in merged_fields:
+            selected_company = fields.get("company")
+            if isinstance(selected_company, str) and selected_company.strip():
+                merged_fields["company"] = selected_company.strip()
+        elif isinstance(fields.get("company"), str) and fields.get("company", "").strip():
+            extracted_company = _canonicalize_company_for_comparison(db, str(merged_fields["company"]))
+            selected_company = _canonicalize_company_for_comparison(db, str(fields["company"]))
+            if extracted_company != selected_company:
+                _log_field_conflict(
+                    proposal=proposal,
+                    field_name="company",
+                    normalized_extracted_value=extracted_company,
+                    normalized_selected_tool_value=selected_company,
+                )
+                return _proposal_with_clarification(CLARIFICATION_CONFLICTING_COMPANY)
+
+        for field_name, extracted_value in extracted_payload.items():
+            if field_name == "company" or field_name not in fields:
+                continue
+            canonical_selected_value = _canonicalize_selected_field_value(field_name, fields[field_name])
+            if canonical_selected_value is _INVALID:
+                continue
+            if canonical_selected_value != extracted_value:
+                _log_field_conflict(
+                    proposal=proposal,
+                    field_name=field_name,
+                    normalized_extracted_value=extracted_value,
+                    normalized_selected_tool_value=canonical_selected_value,
+                )
+                return None
+
+        arguments["fields"] = merged_fields
+        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+
+    if proposal.tool_name == "preview_existing_application_update":
+        arguments = dict(proposal.arguments)
+        target = dict(arguments.get("target") or {})
+        fields = dict(arguments.get("fields") or {})
+        merged_fields = {key: value for key, value in extracted_payload.items() if key != "company"}
+
+        extracted_company = extracted_payload.get("company")
+        if extracted_company is not None:
+            existing_company = target.get("company")
+            if existing_company is None:
+                target["company"] = extracted_company
+            else:
+                canonical_extracted_company = _canonicalize_company_for_comparison(db, str(extracted_company))
+                canonical_selected_company = _canonicalize_company_for_comparison(db, str(existing_company))
+                if canonical_extracted_company != canonical_selected_company:
+                    _log_field_conflict(
+                        proposal=proposal,
+                        field_name="company",
+                        normalized_extracted_value=canonical_extracted_company,
+                        normalized_selected_tool_value=canonical_selected_company,
+                    )
+                    return _proposal_with_clarification(CLARIFICATION_CONFLICTING_COMPANY)
+        for field_name, extracted_value in merged_fields.items():
+            if field_name not in fields:
+                continue
+            canonical_selected_value = _canonicalize_selected_field_value(field_name, fields[field_name])
+            if canonical_selected_value is _INVALID:
+                continue
+            if canonical_selected_value != extracted_value:
+                _log_field_conflict(
+                    proposal=proposal,
+                    field_name=field_name,
+                    normalized_extracted_value=extracted_value,
+                    normalized_selected_tool_value=canonical_selected_value,
+                )
+                return _proposal_with_clarification(CLARIFICATION_CONFLICTING_COMPANY)
+        arguments["target"] = target
+        arguments["fields"] = merged_fields
+        return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
+
+    return proposal
 
 
 def validate_tool_arguments_with_safe_normalization(proposal: SemanticToolCallProposal) -> tuple[SemanticToolCallProposal, object]:
@@ -823,28 +1142,32 @@ def interpret_transcript_command(
     try:
         interpretation = interpreter.interpret(payload.transcript, context)
     except SemanticInterpreterUnavailableError as exc:
-        return SemanticTranscriptResponse(
-            status="unavailable",
-            operation="none",
-            raw_transcript=payload.transcript,
-            proposal=empty_proposal(),
-            warnings=[str(exc)],
-        )
+        return SemanticTranscriptResponse(status="unavailable", operation="none", raw_transcript=payload.transcript, proposal=empty_proposal(), warnings=[str(exc)])
     except SemanticInterpreterInvalidResponseError as exc:
-        return SemanticTranscriptResponse(
-            status="unsupported",
-            operation="none",
-            raw_transcript=payload.transcript,
-            proposal=empty_proposal(),
-            warnings=[str(exc)],
+        return unsupported_response(payload, [str(exc)])
+
+    extracted_fields, extraction_warnings = normalize_extracted_fields(interpretation.extracted_fields)
+    if extracted_fields is None:
+        logger.warning(
+            "semantic_field_extraction_failure reason=%r fields=%r",
+            extraction_warnings,
+            _safe_extracted_field_log(interpretation.extracted_fields.model_dump(exclude_none=True)),
         )
+        return unsupported_response(payload, extraction_warnings, metrics=interpretation.metrics)
 
     logger.info(
         "semantic_raw_ollama_tool_call tool=%s arguments=%r",
         interpretation.proposal.tool_name,
         interpretation.proposal.arguments,
     )
-    proposal = reconcile_explicit_company_candidates(db, interpretation.proposal, explicit_known_companies)
+    merged_proposal = merge_extracted_fields_into_proposal(db, interpretation.proposal, extracted_fields)
+    if merged_proposal is None:
+        return unsupported_response(
+            payload,
+            ["Extracted fields conflicted with selected tool arguments. No tracker changes were saved."],
+            metrics=interpretation.metrics,
+        )
+    proposal = reconcile_explicit_company_candidates(db, merged_proposal, explicit_known_companies)
     metrics = interpretation.metrics
 
     if (
@@ -856,14 +1179,25 @@ def interpret_transcript_command(
             "explicit_company_retry_hint": (
                 f'Exactly one explicit known company appears in the current utterance: "{explicit_known_companies[0]}". '
                 "Do not ask which company to use. Use that company if the selected tool accepts a company field."
-            )
+            ),
+            "normalized_extracted_fields": extracted_fields.model_dump(exclude_none=True),
         }
         try:
             retry_interpretation = interpreter.interpret(payload.transcript, retry_context)
         except (SemanticInterpreterUnavailableError, SemanticInterpreterInvalidResponseError):
             retry_interpretation = None
         if retry_interpretation is not None:
-            proposal = reconcile_explicit_company_candidates(db, retry_interpretation.proposal, explicit_known_companies)
+            retry_extracted_fields, retry_extraction_warnings = normalize_extracted_fields(retry_interpretation.extracted_fields)
+            if retry_extracted_fields is None:
+                return unsupported_response(payload, retry_extraction_warnings, metrics=retry_interpretation.metrics)
+            merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
+            if merged_retry_proposal is None:
+                return unsupported_response(
+                    payload,
+                    ["Extracted fields conflicted with selected tool arguments. No tracker changes were saved."],
+                    metrics=retry_interpretation.metrics,
+                )
+            proposal = reconcile_explicit_company_candidates(db, merged_retry_proposal, explicit_known_companies)
             metrics = retry_interpretation.metrics
 
     try:
@@ -887,7 +1221,8 @@ def interpret_transcript_command(
                     "Your previous tool arguments were invalid. Use the existing patch_active_draft schema. "
                     "Put company in fields.company. Put one or more roles in fields.roles as a JSON array of strings. "
                     "Do not use fields.role unless you are mirroring the same value into fields.roles."
-                )
+                ),
+                "normalized_extracted_fields": extracted_fields.model_dump(exclude_none=True),
             }
             try:
                 retry_interpretation = interpreter.interpret(payload.transcript, retry_context)
@@ -899,7 +1234,17 @@ def interpret_transcript_command(
                     retry_interpretation.proposal.tool_name,
                     retry_interpretation.proposal.arguments,
                 )
-                proposal = reconcile_explicit_company_candidates(db, retry_interpretation.proposal, explicit_known_companies)
+                retry_extracted_fields, retry_extraction_warnings = normalize_extracted_fields(retry_interpretation.extracted_fields)
+                if retry_extracted_fields is None:
+                    return unsupported_response(payload, retry_extraction_warnings, metrics=retry_interpretation.metrics)
+                merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
+                if merged_retry_proposal is None:
+                    return unsupported_response(
+                        payload,
+                        ["Extracted fields conflicted with selected tool arguments. No tracker changes were saved."],
+                        metrics=retry_interpretation.metrics,
+                    )
+                proposal = reconcile_explicit_company_candidates(db, merged_retry_proposal, explicit_known_companies)
                 metrics = retry_interpretation.metrics
                 try:
                     proposal, validated_arguments = validate_tool_arguments_with_safe_normalization(proposal)
@@ -909,21 +1254,9 @@ def interpret_transcript_command(
                         proposal.arguments,
                     )
                 except ValidationError:
-                    return SemanticTranscriptResponse(
-                        status="unsupported",
-                        operation="none",
-                        raw_transcript=payload.transcript,
-                        proposal=empty_proposal(),
-                        warnings=["Local language interpreter returned invalid tool arguments. No tracker changes were saved."],
-                    )
+                    return unsupported_response(payload, ["Local language interpreter returned invalid tool arguments. No tracker changes were saved."])
         if validated_arguments is None:
-            return SemanticTranscriptResponse(
-                status="unsupported",
-                operation="none",
-                raw_transcript=payload.transcript,
-                proposal=empty_proposal(),
-                warnings=["Local language interpreter returned invalid tool arguments. No tracker changes were saved."],
-            )
+            return unsupported_response(payload, ["Local language interpreter returned invalid tool arguments. No tracker changes were saved."])
 
     if proposal.tool_name == "patch_active_draft":
         arguments = validated_arguments

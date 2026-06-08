@@ -10,6 +10,13 @@ def normalize_optional_text(value: str | None) -> str | None:
     return stripped or None
 
 
+def normalize_required_text(value: str, field_name: str) -> str:
+    normalized = " ".join(value.strip().split())
+    if not normalized:
+        raise ValueError(f"{field_name} must contain a non-blank string")
+    return normalized
+
+
 class SemanticFieldPatch(BaseModel):
     company: str | None = None
     roles: list[str] | None = None
@@ -25,18 +32,45 @@ class SemanticFieldPatch(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("company", "job_link", "location", "status", "priority", "next_action", "comments")
+    @field_validator("company", "job_link", "location", "status", "priority")
     @classmethod
     def normalize_text_fields(cls, value: str | None) -> str | None:
         return normalize_optional_text(value)
 
-    @field_validator("roles", "employment_types", "current_stages")
+    @field_validator("next_action", "comments")
     @classmethod
-    def normalize_string_lists(cls, value: list[str] | None) -> list[str] | None:
+    def normalize_required_optional_text_fields(cls, value: str | None, info) -> str | None:
         if value is None:
             return value
-        normalized = [item.strip() for item in value if item and item.strip()]
-        return normalized or []
+        return normalize_required_text(value, info.field_name)
+
+    @field_validator("roles")
+    @classmethod
+    def normalize_roles(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return value
+        normalized: list[str] = []
+        for item in value:
+            normalized_item = normalize_required_text(item, "roles")
+            if normalized_item not in normalized:
+                normalized.append(normalized_item)
+        return normalized
+
+    @field_validator("employment_types", "current_stages")
+    @classmethod
+    def normalize_string_lists(cls, value: list[str] | None, info) -> list[str] | None:
+        if value is None:
+            return value
+        normalized: list[str] = []
+        for item in value:
+            normalized_item = normalize_required_text(item, info.field_name)
+            if normalized_item not in normalized:
+                normalized.append(normalized_item)
+        return normalized
+
+
+class SemanticExtractedFields(SemanticFieldPatch):
+    pass
 
 
 class PatchActiveDraftArguments(BaseModel):

@@ -10,6 +10,7 @@ from app.semantic_validation import (
     CLARIFICATION_MISSING_COMPANY,
     CLARIFICATION_MULTIPLE_EXPLICIT_COMPANIES,
     normalize_patch_active_draft_argument_shape,
+    normalize_semantic_field_patch_argument_shape,
     normalize_role_title,
     normalize_roles,
 )
@@ -19,6 +20,7 @@ from app.semantic_interpreter import (
     get_semantic_interpreter,
 )
 from app.semantic_schemas import SemanticInterpreterMetrics, SemanticToolCallProposal
+from app.semantic_schemas import SemanticExtractedFields
 
 
 REALISTIC_RECORD = {
@@ -80,8 +82,9 @@ async def create_browser_context(client, payload=None):
 
 
 class FakeInterpreter:
-    def __init__(self, *, proposal=None, error=None, metrics=None, health=None):
+    def __init__(self, *, proposal=None, extracted_fields=None, error=None, metrics=None, health=None):
         self.proposal = proposal
+        self.extracted_fields = SemanticExtractedFields.model_validate(extracted_fields or {})
         self.error = error
         self.metrics = metrics or SemanticInterpreterMetrics(latency_ms=12)
         self.health = health or {"status": "ok", "provider": "ollama", "model": "llama3.2:3b", "mode": "tool_calling"}
@@ -91,15 +94,19 @@ class FakeInterpreter:
         self.calls.append({"transcript": transcript, "context": context})
         if self.error is not None:
             raise self.error
-        return SemanticInterpretationResult(proposal=self.proposal, metrics=self.metrics)
+        return SemanticInterpretationResult(
+            proposal=self.proposal,
+            metrics=self.metrics,
+            extracted_fields=self.extracted_fields,
+        )
 
     def health_check(self):
         return self.health
 
 
 class SequencedFakeInterpreter(FakeInterpreter):
-    def __init__(self, proposals):
-        super().__init__(proposal=proposals[0] if proposals else None)
+    def __init__(self, proposals, *, extracted_fields=None):
+        super().__init__(proposal=proposals[0] if proposals else None, extracted_fields=extracted_fields)
         self._proposals = list(proposals)
 
     def interpret(self, transcript: str, context=None):
@@ -107,7 +114,11 @@ class SequencedFakeInterpreter(FakeInterpreter):
         if not self._proposals:
             raise AssertionError("No more proposals configured.")
         proposal_value = self._proposals.pop(0)
-        return SemanticInterpretationResult(proposal=proposal_value, metrics=self.metrics)
+        return SemanticInterpretationResult(
+            proposal=proposal_value,
+            metrics=self.metrics,
+            extracted_fields=self.extracted_fields,
+        )
 
 
 def proposal(**overrides):
@@ -202,6 +213,64 @@ def test_normalize_roles_rejects_blank_role_value():
 
 def test_normalize_roles_accepts_unknown_but_non_blank_role_title():
     assert normalize_roles(["Unknown Ninja Role"], tool_name="patch_active_draft") == ["Unknown Ninja Role"]
+
+
+def test_normalize_semantic_field_patch_argument_shape_converts_fulltime_to_full_time():
+    normalized = normalize_semantic_field_patch_argument_shape({"type": "fulltime"})
+
+    assert normalized == {"employment_types": ["Full Time"]}
+
+
+def test_normalize_semantic_field_patch_argument_shape_converts_on_site_to_onsite():
+    normalized = normalize_semantic_field_patch_argument_shape({"location": "on site"})
+
+    assert normalized == {"location": "onsite"}
+
+
+def test_normalize_semantic_field_patch_argument_shape_converts_wfh_to_remote():
+    normalized = normalize_semantic_field_patch_argument_shape({"location": "wfh"})
+
+    assert normalized == {"location": "remote"}
+
+
+def test_normalize_semantic_field_patch_argument_shape_converts_high_to_uppercase_priority():
+    normalized = normalize_semantic_field_patch_argument_shape({"priority": "high"})
+
+    assert normalized == {"priority": "HIGH"}
+
+
+def test_normalize_semantic_field_patch_argument_shape_converts_applied_to_canonical_status():
+    normalized = normalize_semantic_field_patch_argument_shape({"status": "applied"})
+
+    assert normalized == {"status": "Applied"}
+
+
+def test_normalize_semantic_field_patch_argument_shape_promotes_current_stage_scalar_to_array():
+    normalized = normalize_semantic_field_patch_argument_shape({"current_stage": "Applied"})
+
+    assert normalized == {"current_stages": ["Applied"]}
+
+
+def test_normalize_semantic_field_patch_argument_shape_preserves_multiple_stages():
+    normalized = normalize_semantic_field_patch_argument_shape({"stage": ["Applied", "Engaged"]})
+
+    assert normalized == {"current_stages": ["Applied", "Engaged"]}
+
+
+def test_normalize_semantic_field_patch_argument_shape_trims_comments_and_next_action():
+    normalized = normalize_semantic_field_patch_argument_shape(
+        {"comments": "  referral received  ", "next_action": "  follow up tomorrow  "}
+    )
+
+    assert normalized == {"comments": "referral received", "next_action": "follow up tomorrow"}
+
+
+def test_normalize_semantic_field_patch_argument_shape_rejects_conflicting_alias_and_canonical_values():
+    normalized = normalize_semantic_field_patch_argument_shape(
+        {"employment_types": ["Full Time"], "type": "Internship"}
+    )
+
+    assert normalized is None
 
 
 async def parse_transcript(client, transcript, interpreter, context=None):
@@ -484,6 +553,7 @@ def test_detect_explicit_known_companies_prefers_longest_phrase_first(db_session
 async def test_parse_transcript_known_company_reconciles_missing_company_for_patch_active_draft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -499,9 +569,33 @@ async def test_parse_transcript_known_company_reconciles_missing_company_for_pat
 
 
 @pytest.mark.anyio
+async def test_parse_transcript_conversational_extraction_safely_merges_missing_role(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={"fields": {"company": "Neilsoft"}, "replace_explicit_fields": True, "context_notes": []},
+        ),
+    )
+
+    parsed = await parse_transcript(
+        client,
+        "I have previously worked at this company. It's called Neilsoft. I'd like to track AI Engineer application for this position.",
+        interpreter,
+    )
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+    assert interpreter.calls[0]["context"]["explicit_known_companies"] == ["Neilsoft"]
+
+
+@pytest.mark.anyio
 async def test_parse_transcript_role_alias_shape_is_repaired_for_varied_word_order(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "role": "AI Engineer"}, "replace_explicit_fields": True, "context_notes": []},
@@ -536,6 +630,7 @@ async def test_parse_transcript_scalar_roles_shape_is_repaired(client):
 async def test_parse_transcript_role_at_neilsoft_for_ai_engineer(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -553,6 +648,7 @@ async def test_parse_transcript_role_at_neilsoft_for_ai_engineer(client):
 async def test_parse_transcript_ai_engineer_role_for_neilsoft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -570,6 +666,7 @@ async def test_parse_transcript_ai_engineer_role_for_neilsoft(client):
 async def test_parse_transcript_at_neilsoft_role_is_ai_engineer(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -584,9 +681,28 @@ async def test_parse_transcript_at_neilsoft_role_is_ai_engineer(client):
 
 
 @pytest.mark.anyio
+async def test_parse_transcript_track_ai_engineer_opening_at_neilsoft(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={"fields": {"company": "Neilsoft"}, "replace_explicit_fields": True, "context_notes": []},
+        ),
+    )
+
+    parsed = await parse_transcript(client, "Track an AI Engineer opening at Neilsoft", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+
+
+@pytest.mark.anyio
 async def test_parse_transcript_applied_ai_engineer_role_for_neilsoft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["Applied AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["Applied AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -604,6 +720,7 @@ async def test_parse_transcript_applied_ai_engineer_role_for_neilsoft(client):
 async def test_parse_transcript_ai_engineer_intern_role_for_neilsoft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer Intern"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer Intern"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -618,9 +735,85 @@ async def test_parse_transcript_ai_engineer_intern_role_for_neilsoft(client):
 
 
 @pytest.mark.anyio
+async def test_parse_transcript_representative_patch_normalizes_multiple_fields(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={
+            "company": "Neilsoft",
+            "roles": ["AI Engineer"],
+            "employment_types": ["fulltime"],
+            "location": "onsite",
+            "priority": "high",
+        },
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {
+                    "company": "Neilsoft",
+                    "role": "AI Engineer role",
+                    "type": "fulltime",
+                    "location": "on site",
+                    "priority": "high priority",
+                },
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        )
+    )
+
+    parsed = await parse_transcript(client, "Neilsoft sathi AI Engineer role, fulltime onsite, high priority", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+    assert parsed["draft"]["employment_types_json"] == ["Full Time"]
+    assert parsed["draft"]["location"] == "onsite"
+    assert parsed["draft"]["priority"] == "HIGH"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_reported_false_conflict_sentence_uses_authoritative_extracted_fields(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={
+            "company": "Neilsoft",
+            "roles": ["AI Engineer"],
+            "employment_types": ["Full Time"],
+            "location": "onsite",
+        },
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {
+                    "company": "Neilsoft",
+                    "roles": ["for AI Engineer"],
+                    "employment_types": ["full time"],
+                    "location": "on site",
+                },
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        ),
+    )
+
+    parsed = await parse_transcript(
+        client,
+        "I'd like to track an application for Neilsoft, the role is for AI Engineer, the type is full time, the location is onsite.",
+        interpreter,
+    )
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+    assert parsed["draft"]["employment_types_json"] == ["Full Time"]
+    assert parsed["draft"]["location"] == "onsite"
+
+
+@pytest.mark.anyio
 async def test_parse_transcript_multi_word_company_role_variant(client):
     register_known_company("Rockwell Automation")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Rockwell Automation", "roles": ["ML Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Rockwell Automation", "roles": ["ML Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -635,9 +828,117 @@ async def test_parse_transcript_multi_word_company_role_variant(client):
 
 
 @pytest.mark.anyio
+async def test_parse_transcript_filler_is_ignored_during_extraction_merge(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={"fields": {"company": "Neilsoft"}, "replace_explicit_fields": True, "context_notes": []},
+        ),
+    )
+
+    parsed = await parse_transcript(
+        client,
+        "I previously worked at this company, actually. Anyway, it is called Neilsoft. Please track an AI Engineer application.",
+        interpreter,
+    )
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_remote_internship_aliases_normalize_for_draft(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "employment_types": ["internship"], "location": "remote"},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {"company": "Neilsoft", "employment_type": "intern", "location": "wfh"},
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        )
+    )
+
+    parsed = await parse_transcript(client, "Neilsoft application is remote internship", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["employment_types_json"] == ["Internship"]
+    assert parsed["draft"]["location"] == "remote"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_remote_fulltime_role_extraction_is_preserved(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={
+            "company": "Neilsoft",
+            "roles": ["AI Engineer"],
+            "employment_types": ["Full Time"],
+            "location": "remote",
+        },
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={"fields": {"company": "Neilsoft"}, "replace_explicit_fields": True, "context_notes": []},
+        ),
+    )
+
+    parsed = await parse_transcript(
+        client,
+        "I want to track a remote fulltime AI Engineer application for Neilsoft",
+        interpreter,
+    )
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+    assert parsed["draft"]["employment_types_json"] == ["Full Time"]
+    assert parsed["draft"]["location"] == "remote"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_equivalent_selected_values_do_not_conflict(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={
+            "company": "Neilsoft",
+            "roles": ["AI Engineer"],
+            "employment_types": ["Full Time"],
+            "location": "onsite",
+        },
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {
+                    "company": "Neilsoft",
+                    "roles": ["AI Engineer role"],
+                    "employment_types": ["full-time"],
+                    "location": "on-site",
+                },
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        ),
+    )
+
+    parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+    assert parsed["draft"]["employment_types_json"] == ["Full Time"]
+    assert parsed["draft"]["location"] == "onsite"
+
+
+@pytest.mark.anyio
 async def test_parse_transcript_conflicting_role_and_roles_values_fail_safely(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={
@@ -655,6 +956,57 @@ async def test_parse_transcript_conflicting_role_and_roles_values_fail_safely(cl
 
 
 @pytest.mark.anyio
+async def test_parse_transcript_extracted_company_conflict_fails_safely_without_db_write(client):
+    register_known_company("Neilsoft")
+    register_known_company("Rockwell Automation")
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {"company": "Rockwell Automation"},
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        ),
+    )
+
+    parsed = await parse_transcript(client, "Track AI Engineer application for Neilsoft", interpreter)
+
+    assert parsed["status"] == "clarification_required"
+    assert parsed["clarification_question"] == CLARIFICATION_CONFLICTING_COMPANY
+
+    listed = await client.get("/applications")
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_real_field_conflict_fails_safely_without_db_write(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"], "location": "onsite"},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {"company": "Neilsoft", "roles": ["ML Engineer"], "location": "remote"},
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        ),
+    )
+
+    parsed = await parse_transcript(client, "Track AI Engineer application for Neilsoft onsite", interpreter)
+
+    assert parsed["status"] == "unsupported"
+    assert "Extracted fields conflicted with selected tool arguments. No tracker changes were saved." in parsed["warnings"]
+
+    listed = await client.get("/applications")
+    assert listed.status_code == 200
+    assert listed.json() == []
+
+
+@pytest.mark.anyio
 async def test_parse_transcript_non_string_role_rejected(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
@@ -662,6 +1014,26 @@ async def test_parse_transcript_non_string_role_rejected(client):
             tool_name="patch_active_draft",
             arguments={
                 "fields": {"company": "Neilsoft", "roles": [{"title": "AI Engineer"}]},
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        )
+    )
+
+    parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
+
+    assert parsed["status"] == "unsupported"
+    assert "Local language interpreter returned invalid tool arguments. No tracker changes were saved." in parsed["warnings"]
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_blank_role_rejected(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {"company": "Neilsoft", "roles": ["   "]},
                 "replace_explicit_fields": True,
                 "context_notes": [],
             },
@@ -871,6 +1243,43 @@ async def test_parse_transcript_patch_active_draft_preserves_company_for_type_an
     assert parsed["draft"]["roles_json"] == ["AI Engineer"]
     assert parsed["draft"]["employment_types_json"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_patch_active_draft_normalizes_current_stage_alias_with_active_draft(client):
+    interpreter = FakeInterpreter(
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={"fields": {"current_stage": "Applied"}, "replace_explicit_fields": True, "context_notes": []},
+        )
+    )
+
+    parsed = await parse_transcript(
+        client,
+        "Set current stage Applied",
+        interpreter,
+        context={
+            "active_draft": {
+                "company": "Neilsoft",
+                "roles": ["AI Engineer"],
+                "employment_types": ["Full Time"],
+                "job_link": "",
+                "location": "",
+                "status": "",
+                "current_stages": [],
+                "priority": "",
+                "engaged_days": 0,
+                "next_action": "",
+                "comments": "",
+            }
+        },
+    )
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+    assert parsed["draft"]["employment_types_json"] == ["Full Time"]
+    assert parsed["draft"]["current_stages_json"] == ["Applied"]
 
 
 @pytest.mark.anyio
@@ -1086,6 +1495,7 @@ async def test_parse_transcript_multiple_explicit_companies_return_safe_clarific
 @pytest.mark.anyio
 async def test_parse_transcript_unknown_company_follows_existing_safe_behavior(client):
     interpreter = FakeInterpreter(
+        extracted_fields={"roles": ["AI Engineer"]},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -1096,6 +1506,23 @@ async def test_parse_transcript_unknown_company_follows_existing_safe_behavior(c
 
     assert parsed["status"] == "clarification_required"
     assert parsed["clarification_question"] == CLARIFICATION_MISSING_COMPANY
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_unknown_new_company_still_supported_via_extraction(client):
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "NewStartup Labs", "roles": ["AI Engineer"]},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={"fields": {"company": "NewStartup Labs"}, "replace_explicit_fields": True, "context_notes": []},
+        ),
+    )
+
+    parsed = await parse_transcript(client, "Track an AI Engineer application at NewStartup Labs", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "NewStartup Labs"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
 
 
 @pytest.mark.anyio
@@ -1187,6 +1614,114 @@ async def test_parse_transcript_preview_existing_application_update_replaces_com
 
 
 @pytest.mark.anyio
+async def test_parse_transcript_preview_existing_application_update_normalizes_status_alias(client):
+    created = await create_record(client, REALISTIC_RECORD | {"company": "Neilsoft", "status": ""})
+    interpreter = FakeInterpreter(
+        proposal=proposal(
+            tool_name="preview_existing_application_update",
+            arguments={
+                "target": {"company": "Neilsoft"},
+                "fields": {"status": "applied"},
+                "replace_explicit_fields": True,
+            },
+        )
+    )
+
+    parsed = await parse_transcript(client, "For Neilsoft set status applied", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["application_id"] == created["id"]
+    assert parsed["draft"]["status"] == "Applied"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_preview_existing_application_update_normalizes_priority_alias(client):
+    created = await create_record(client, REALISTIC_RECORD | {"company": "Neilsoft", "priority": "LOW"})
+    interpreter = FakeInterpreter(
+        proposal=proposal(
+            tool_name="preview_existing_application_update",
+            arguments={
+                "target": {"company": "Neilsoft"},
+                "fields": {"priority": "high"},
+                "replace_explicit_fields": True,
+            },
+        )
+    )
+
+    parsed = await parse_transcript(client, "Set Neilsoft priority high", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["application_id"] == created["id"]
+    assert parsed["draft"]["priority"] == "HIGH"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_persisted_target_company_conflict_remains_safe(client):
+    await create_record(client, REALISTIC_RECORD | {"company": "Neilsoft"})
+    await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation"})
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "priority": "HIGH"},
+        proposal=proposal(
+            tool_name="preview_existing_application_update",
+            arguments={
+                "target": {"company": "Rockwell Automation"},
+                "fields": {"priority": "HIGH"},
+                "replace_explicit_fields": True,
+            },
+        ),
+    )
+
+    parsed = await parse_transcript(client, "Set Neilsoft priority high", interpreter)
+
+    assert parsed["status"] == "clarification_required"
+    assert parsed["clarification_question"] == CLARIFICATION_CONFLICTING_COMPANY
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_preview_existing_application_update_preserves_trimmed_note_text(client):
+    created = await create_record(client, REALISTIC_RECORD | {"company": "Neilsoft", "comments": ""})
+    interpreter = FakeInterpreter(
+        proposal=proposal(
+            tool_name="preview_existing_application_update",
+            arguments={
+                "target": {"company": "Neilsoft"},
+                "fields": {"comments": "  referral received  "},
+                "replace_explicit_fields": True,
+            },
+        )
+    )
+
+    parsed = await parse_transcript(client, "Add note for Neilsoft saying referral received", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["application_id"] == created["id"]
+    assert parsed["draft"]["comments"] == "referral received"
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_invented_pass2_patch_field_is_discarded_when_not_extracted(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {"company": "Neilsoft", "roles": ["AI Engineer"], "priority": "HIGH"},
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        ),
+    )
+
+    parsed = await parse_transcript(client, "Track an AI Engineer application at Neilsoft", interpreter)
+
+    assert parsed["status"] == "preview"
+    assert parsed["draft"]["company"] == "Neilsoft"
+    assert parsed["draft"]["roles_json"] == ["AI Engineer"]
+    assert parsed["draft"]["priority"] == ""
+
+
+@pytest.mark.anyio
 async def test_parse_transcript_patch_active_draft_warns_when_full_time_is_not_used_as_status(client):
     interpreter = FakeInterpreter(
         proposal=proposal(
@@ -1254,6 +1789,30 @@ async def test_parse_transcript_unsupported_priority_is_rejected(client):
 
     assert parsed["status"] == "unsupported"
     assert "Unsupported priority value." in parsed["warnings"]
+
+
+@pytest.mark.anyio
+async def test_parse_transcript_contract_type_alias_is_rejected_without_db_write(client):
+    register_known_company("Neilsoft")
+    interpreter = FakeInterpreter(
+        proposal=proposal(
+            tool_name="patch_active_draft",
+            arguments={
+                "fields": {"company": "Neilsoft", "type": "contract"},
+                "replace_explicit_fields": True,
+                "context_notes": [],
+            },
+        )
+    )
+
+    parsed = await parse_transcript(client, "Neilsoft application is contract", interpreter)
+
+    assert parsed["status"] == "unsupported"
+    assert "Unsupported employment type value." in parsed["warnings"]
+
+    listed = await client.get("/applications")
+    assert listed.status_code == 200
+    assert listed.json() == []
 
 
 @pytest.mark.anyio
