@@ -2,8 +2,11 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from sqlalchemy.engine import URL, make_url
+
+
+_loaded_backend_env_values: dict[str, str] = {}
 
 
 def get_backend_root() -> Path:
@@ -18,7 +21,14 @@ def _load_backend_environment_cached(env_path_str: str) -> str | None:
     env_path = Path(env_path_str)
     if not env_path.exists():
         return None
-    load_dotenv(dotenv_path=env_path, override=False)
+
+    for key, value in dotenv_values(env_path).items():
+        if value is None:
+            continue
+        if key not in os.environ or key in _loaded_backend_env_values:
+            os.environ[key] = value
+            _loaded_backend_env_values[key] = value
+
     return str(env_path)
 
 
@@ -28,6 +38,10 @@ def load_backend_environment() -> Path | None:
 
 
 def reset_backend_environment_cache() -> None:
+    for key, value in list(_loaded_backend_env_values.items()):
+        if os.environ.get(key) == value:
+            os.environ.pop(key, None)
+    _loaded_backend_env_values.clear()
     _load_backend_environment_cached.cache_clear()
 
 
