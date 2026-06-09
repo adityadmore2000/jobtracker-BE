@@ -37,6 +37,7 @@ CLARIFICATION_AMBIGUOUS_APPLICATION = "Multiple applications match this company.
 CLARIFICATION_NO_ACTIVE_DRAFT = "There is no active draft to save."
 CLARIFICATION_CONFLICTING_COMPANY = "I found conflicting company names. Which company should I use?"
 CLARIFICATION_MULTIPLE_EXPLICIT_COMPANIES = "I found multiple company names. Which company should I use?"
+CLARIFICATION_RETRY_EXHAUSTED = "I could not interpret that reliably. Please rephrase your request."
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
@@ -132,18 +133,6 @@ def normalize_role_title(value: str) -> str:
     return " ".join(value.strip().split())
 
 
-def normalize_role_boundary_noise(value: str) -> str:
-    normalized = normalize_role_title(value)
-    if not normalized:
-        return ""
-    words = normalized.split()
-    if words and words[0].casefold() == "for":
-        words = words[1:]
-    if words and words[-1].casefold() == "role":
-        words = words[:-1]
-    return " ".join(words)
-
-
 EMPLOYMENT_TYPE_ALIASES = {
     "internship": "Internship",
     "intern": "Internship",
@@ -169,7 +158,7 @@ def normalize_roles(values: list[str] | None, *, tool_name: str | None = None) -
         return None
     normalized_values: list[str] = []
     for value in values:
-        normalized_role_value = normalize_role_boundary_noise(value)
+        normalized_role_value = normalize_role_title(value)
         if not normalized_role_value:
             logger.warning(
                 "semantic_role_validation_failed tool=%s raw_role_value=%r normalized_role_value=%r reason=%r",
@@ -761,7 +750,7 @@ def _normalize_role_values(value: object) -> object:
 
     normalized_values: list[str] = []
     for raw_value in raw_values:
-        normalized = normalize_role_boundary_noise(raw_value)
+        normalized = normalize_role_title(raw_value)
         if not normalized:
             return _INVALID
         if normalized not in normalized_values:
@@ -1139,6 +1128,10 @@ def interpret_transcript_command(
     interpreter: OllamaSemanticInterpreter,
 ) -> SemanticTranscriptResponse:
     context, explicit_known_companies = build_interpreter_context(db, payload)
+    # OLLAMA_MAX_TOOL_TURNS caps how many times interpret() may run for one transcript
+    # request (initial call plus any clarification/schema-repair retries). Default is 2.
+    max_tool_turns = max(1, interpreter.settings.max_tool_turns)
+    interpret_calls = 1
     try:
         interpretation = interpreter.interpret(payload.transcript, context)
     except SemanticInterpreterUnavailableError as exc:
@@ -1174,6 +1167,7 @@ def interpret_transcript_command(
         proposal.tool_name == "ask_clarification"
         and proposal.arguments.get("question") == CLARIFICATION_MISSING_COMPANY
         and len(explicit_known_companies) == 1
+        and interpret_calls < max_tool_turns
     ):
         retry_context = context | {
             "explicit_company_retry_hint": (
@@ -1184,6 +1178,7 @@ def interpret_transcript_command(
         }
         try:
             retry_interpretation = interpreter.interpret(payload.transcript, retry_context)
+            interpret_calls += 1
         except (SemanticInterpreterUnavailableError, SemanticInterpreterInvalidResponseError):
             retry_interpretation = None
         if retry_interpretation is not None:
@@ -1215,7 +1210,7 @@ def interpret_transcript_command(
             exc.errors(),
         )
         validated_arguments = None
-        if proposal.tool_name == "patch_active_draft":
+        if proposal.tool_name == "patch_active_draft" and interpret_calls < max_tool_turns:
             retry_context = context | {
                 "schema_repair_retry_hint": (
                     "Your previous tool arguments were invalid. Use the existing patch_active_draft schema. "
@@ -1226,6 +1221,7 @@ def interpret_transcript_command(
             }
             try:
                 retry_interpretation = interpreter.interpret(payload.transcript, retry_context)
+                interpret_calls += 1
             except (SemanticInterpreterUnavailableError, SemanticInterpreterInvalidResponseError):
                 retry_interpretation = None
             if retry_interpretation is not None:
@@ -1256,6 +1252,17 @@ def interpret_transcript_command(
                 except ValidationError:
                     return unsupported_response(payload, ["Local language interpreter returned invalid tool arguments. No tracker changes were saved."])
         if validated_arguments is None:
+            if interpret_calls >= max_tool_turns:
+                # Retry budget exhausted: ask the user to rephrase instead of looping further.
+                return SemanticTranscriptResponse(
+                    status="clarification_required",
+                    operation="none",
+                    raw_transcript=payload.transcript,
+                    proposal=_proposal_with_clarification(CLARIFICATION_RETRY_EXHAUSTED),
+                    warnings=["Local language interpreter returned invalid tool arguments. No tracker changes were saved."],
+                    clarification_question=CLARIFICATION_RETRY_EXHAUSTED,
+                    interpreter_metrics=metrics,
+                )
             return unsupported_response(payload, ["Local language interpreter returned invalid tool arguments. No tracker changes were saved."])
 
     if proposal.tool_name == "patch_active_draft":

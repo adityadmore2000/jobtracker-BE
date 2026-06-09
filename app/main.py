@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .company_matching import has_meaningful_company_difference, normalize_company_name
 from .company_resolution import (
     ensure_canonical_company,
+    get_application_matches_for_company,
     get_canonical_company_by_normalized_name,
     get_company_alias_by_normalized_name,
     resolve_company_name,
@@ -44,7 +45,7 @@ from .schemas import (
     TranscriptParseRequest,
 )
 from .semantic_interpreter import OllamaSemanticInterpreter, get_semantic_interpreter
-from .semantic_validation import interpret_transcript_command
+from .semantic_validation import interpret_transcript_command, normalize_role_title
 
 
 @asynccontextmanager
@@ -91,6 +92,18 @@ def create_job_application(db: Session, payload: JobApplicationCreate) -> JobApp
     db.add(application)
     db.flush()
     return application
+
+
+def find_duplicate_role(db: Session, canonical_company_name: str, incoming_roles: list[str]) -> str | None:
+    existing_roles = {
+        normalize_role_title(existing_role).casefold()
+        for application in get_application_matches_for_company(db, canonical_company_name)
+        for existing_role in application.roles_json
+    }
+    for incoming_role in incoming_roles:
+        if normalize_role_title(incoming_role).casefold() in existing_roles:
+            return incoming_role
+    return None
 
 
 def maybe_create_alias(
@@ -262,6 +275,14 @@ async def create_application_candidate(
         return {"status": "confirmation_required", "requires_confirmation": True, "candidate": payload}
 
     application_payload = JobApplicationCreate(**(payload.model_dump(exclude={"raw_transcript", "original_extracted_company_name", "audio_reference"}) | {"company": resolved_company_name}))
+
+    duplicate_role = find_duplicate_role(db, resolved_company_name, application_payload.roles_json)
+    if duplicate_role is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Application for {resolved_company_name} — {duplicate_role} already exists.",
+        )
+
     application = create_job_application(db, application_payload)
     db.commit()
     db.refresh(application)

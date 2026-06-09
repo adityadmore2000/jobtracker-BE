@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -82,12 +84,13 @@ async def create_browser_context(client, payload=None):
 
 
 class FakeInterpreter:
-    def __init__(self, *, proposal=None, extracted_fields=None, error=None, metrics=None, health=None):
+    def __init__(self, *, proposal=None, extracted_fields=None, error=None, metrics=None, health=None, max_tool_turns=2):
         self.proposal = proposal
         self.extracted_fields = SemanticExtractedFields.model_validate(extracted_fields or {})
         self.error = error
         self.metrics = metrics or SemanticInterpreterMetrics(latency_ms=12)
         self.health = health or {"status": "ok", "provider": "ollama", "model": "llama3.2:3b", "mode": "tool_calling"}
+        self.settings = SimpleNamespace(max_tool_turns=max_tool_turns)
         self.calls: list[dict[str, object | None]] = []
 
     def interpret(self, transcript: str, context=None):
@@ -786,7 +789,7 @@ async def test_parse_transcript_reported_false_conflict_sentence_uses_authoritat
             arguments={
                 "fields": {
                     "company": "Neilsoft",
-                    "roles": ["for AI Engineer"],
+                    "roles": ["AI Engineer"],
                     "employment_types": ["full time"],
                     "location": "on site",
                 },
@@ -916,7 +919,7 @@ async def test_parse_transcript_equivalent_selected_values_do_not_conflict(clien
             arguments={
                 "fields": {
                     "company": "Neilsoft",
-                    "roles": ["AI Engineer role"],
+                    "roles": ["AI Engineer"],
                     "employment_types": ["full-time"],
                     "location": "on-site",
                 },
@@ -952,7 +955,7 @@ async def test_parse_transcript_conflicting_role_and_roles_values_fail_safely(cl
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
     assert parsed["status"] == "unsupported"
-    assert "Local language interpreter returned invalid tool arguments. No tracker changes were saved." in parsed["warnings"]
+    assert "Extracted fields conflicted with selected tool arguments. No tracker changes were saved." in parsed["warnings"]
 
 
 @pytest.mark.anyio
@@ -2198,6 +2201,27 @@ async def test_open_ended_role_titles_are_accepted(client):
 
 
 @pytest.mark.anyio
+async def test_arbitrary_role_string_is_accepted(client):
+    payload = REALISTIC_RECORD | {"roles_json": ["Galactic Overlord Engineer"]}
+    created = await create_record(client, payload)
+    assert created["roles_json"] == ["Galactic Overlord Engineer"]
+
+
+@pytest.mark.anyio
+async def test_blank_role_string_is_rejected(client):
+    payload = REALISTIC_RECORD | {"roles_json": [""]}
+    response = await client.post("/applications", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_role_with_word_role_in_title_is_stored_correctly(client):
+    payload = REALISTIC_RECORD | {"roles_json": ["Platform Role"]}
+    created = await create_record(client, payload)
+    assert created["roles_json"] == ["Platform Role"]
+
+
+@pytest.mark.anyio
 async def test_blank_role_rejection(client):
     payload = REALISTIC_RECORD | {"roles_json": ["   "]}
     response = await client.post("/applications", json=payload)
@@ -2435,7 +2459,7 @@ async def test_changed_asr_company_name_becomes_alias_when_meaningfully_differen
         client,
         {
             "company": "crew trim labs",
-            "roles_json": ["AI Engineer"],
+            "roles_json": ["ML Engineer"],
             "employment_types_json": ["Internship"],
             "job_link": "",
             "location": "",
@@ -2495,6 +2519,64 @@ async def test_existing_company_create_path_does_not_trigger_confirmation_popup(
     assert response["application"]["company"] == "Analytics Vidhya"
 
 
+def _candidate_payload(company: str, roles: list[str]) -> dict:
+    return {
+        "company": company,
+        "roles_json": roles,
+        "employment_types_json": [],
+        "job_link": "",
+        "location": "",
+        "status": "",
+        "current_stages_json": [],
+        "priority": "",
+        "engaged_days": 0,
+        "next_action": "",
+        "comments": "",
+    }
+
+
+@pytest.mark.anyio
+async def test_create_duplicate_company_and_role_is_rejected(client):
+    register_known_company("Rockwell")
+    first = await create_candidate(client, _candidate_payload("Rockwell", ["AI Engineer"]))
+    assert first["status"] == "created"
+
+    response = await client.post("/applications/create-candidate", json=_candidate_payload("Rockwell", ["AI Engineer"]))
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Application for Rockwell — AI Engineer already exists."
+
+    listed = await client.get("/applications")
+    assert len([row for row in listed.json() if row["company"] == "Rockwell"]) == 1
+
+
+@pytest.mark.anyio
+async def test_create_same_company_different_role_is_allowed(client):
+    register_known_company("Rockwell")
+    first = await create_candidate(client, _candidate_payload("Rockwell", ["AI Intern"]))
+    assert first["status"] == "created"
+
+    second = await create_candidate(client, _candidate_payload("Rockwell", ["GET Program"]))
+    assert second["status"] == "created"
+
+    listed = await client.get("/applications")
+    rockwell_rows = [row for row in listed.json() if row["company"] == "Rockwell"]
+    assert len(rockwell_rows) == 2
+
+
+@pytest.mark.anyio
+async def test_create_duplicate_is_case_insensitive(client):
+    register_known_company("Rockwell")
+    first = await create_candidate(client, _candidate_payload("Rockwell", ["ai engineer"]))
+    assert first["status"] == "created"
+
+    response = await client.post("/applications/create-candidate", json=_candidate_payload("Rockwell", ["AI Engineer"]))
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+
+    listed = await client.get("/applications")
+    assert len([row for row in listed.json() if row["company"] == "Rockwell"]) == 1
+
+
 @pytest.mark.anyio
 async def test_alias_lookup_resolves_to_canonical_company(client):
     await confirm_candidate(
@@ -2521,7 +2603,7 @@ async def test_alias_lookup_resolves_to_canonical_company(client):
         client,
         {
             "company": "Crew-Trim Labs",
-            "roles_json": ["AI Engineer"],
+            "roles_json": ["ML Engineer"],
             "employment_types_json": ["Part Time"],
             "job_link": "",
             "location": "",

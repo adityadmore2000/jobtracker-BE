@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import httpx
@@ -6,6 +7,7 @@ import pytest
 from app import database_config, semantic_interpreter
 from app.semantic_interpreter import (
     OllamaSemanticInterpreter,
+    OllamaSettings,
     SemanticInterpreterInvalidResponseError,
     SemanticInterpreterUnavailableError,
     build_field_extraction_messages,
@@ -127,7 +129,7 @@ def test_build_ollama_messages_includes_retry_hint_and_explicit_companies() -> N
     assert "Company and other fields may appear in any natural order." in messages[0]["content"]
     assert "Role at Neilsoft for AI Engineer" in messages[0]["content"]
     assert "Do not include connector words such as \"for\"" in messages[0]["content"]
-    assert "Do not include the label word \"role\" inside the role value" in messages[0]["content"]
+    assert "Do not include label words like \"role\", \"priority\", or \"stage\" inside values" in messages[0]["content"]
     assert "Neilsoft sathi AI Engineer role, fulltime onsite, high priority" in messages[0]["content"]
     assert "Set Neilsoft current stage to Applied and Engaged" in messages[0]["content"]
     assert '"explicit_known_companies_in_current_utterance": ["Neilsoft"]' in messages[1]["content"]
@@ -322,3 +324,35 @@ def test_multiple_tool_calls_are_rejected(monkeypatch: pytest.MonkeyPatch) -> No
 
     with pytest.raises(SemanticInterpreterInvalidResponseError):
         OllamaSemanticInterpreter().interpret("Add Neilsoft for AI Engineer")
+
+
+def test_interpret_respects_ollama_max_tool_turns(monkeypatch: pytest.MonkeyPatch) -> None:
+    call_count = {"n": 0}
+
+    def fake_post(url, json, timeout):
+        call_count["n"] += 1
+        return httpx.Response(
+            200,
+            json={"message": {"content": "not-json"}, "total_duration": 1},
+            request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat"),
+        )
+
+    monkeypatch.setattr(semantic_interpreter.httpx, "post", fake_post)
+
+    settings = OllamaSettings(
+        base_url="http://127.0.0.1:11434",
+        model="llama3.2:3b",
+        timeout_seconds=5.0,
+        keep_alive="5m",
+        max_tool_turns=1,
+    )
+    interpreter = OllamaSemanticInterpreter(settings)
+    assert interpreter.settings.max_tool_turns == 1
+
+    # Always-invalid JSON must terminate with a recoverable error, never an infinite loop.
+    with pytest.raises(SemanticInterpreterInvalidResponseError):
+        interpreter.interpret("Add Neilsoft", {})
+
+    # A single interpret() stays bounded to its two passes (extract + select); invalid
+    # extraction JSON triggers at most one internal retry and never exceeds two Ollama calls.
+    assert call_count["n"] <= 2

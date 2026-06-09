@@ -494,7 +494,6 @@ class OllamaSemanticInterpreter:
             metrics=_merge_metrics(extraction_metrics, selection_result.metrics),
             extracted_fields=extracted_fields,
         )
-        return SemanticInterpretationResult(proposal=proposal, metrics=metrics)
 
 
 def get_semantic_interpreter() -> OllamaSemanticInterpreter:

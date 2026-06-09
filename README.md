@@ -187,20 +187,29 @@ Architecture:
 
 ```text
 transcript
-    -> Ollama /api/chat with llama3.2:3b
-    -> one tool call from message.tool_calls
+    -> Ollama /api/chat with llama3.2:3b, two passes per interpret() call:
+         pass 1: field extraction (authoritative explicitly-stated fields)
+         pass 2: tool selection (one tool call from message.tool_calls)
     -> Pydantic tool-argument validation
-    -> deterministic backend validation and resolution
+    -> deterministic backend validation, merge, and resolution
+    -> bounded retries: interpret() may run again on a missing-company
+       clarification or a schema-repair, capped by OLLAMA_MAX_TOOL_TURNS
+       (default 2 interpret() calls per transcript request); once the cap is
+       reached the backend returns a clarification instead of retrying further
     -> preview / clarification / confirmation response
     -> database mutation only through the normal create/update endpoints
 ```
+
+Each `interpret()` call therefore issues two Ollama `/api/chat` requests
+(extraction then selection). `OLLAMA_MAX_TOOL_TURNS` caps how many times
+`interpret()` runs for a single transcript, not the number of Ollama requests.
 
 The backend remains authoritative for:
 
 - allowed enum validation
 - exact normalized company lookup
 - canonical company alias lookup
-- role alias canonicalization
+- free-form role acceptance (roles are non-blank strings; there is no role enum)
 - ambiguity detection
 - partial unsaved-draft acceptance
 - clarification templates for common missing-target cases

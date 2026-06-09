@@ -1,3 +1,5 @@
+# Roles are free-form strings. ALLOWED_ROLES is a UI / ASR-hotword hint only and is
+# NOT enforced for validation anywhere in the backend. Any non-blank role string is valid.
 ALLOWED_ROLES = [
     "AI Engineer",
     "Generative AI Engineer",
