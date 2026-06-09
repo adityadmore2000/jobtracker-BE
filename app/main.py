@@ -40,6 +40,7 @@ from .schemas import (
     AsrHotwordsResponse,
     BrowserContextCreate,
     BrowserContextResponse,
+    DraftPatchRequest,
     JobApplicationCreate,
     JobApplicationRead,
     JobApplicationUpdate,
@@ -208,6 +209,85 @@ async def health() -> dict[str, str]:
 @app.get("/semantic-interpreter/health")
 async def semantic_interpreter_health(interpreter: OllamaSemanticInterpreter = Depends(get_semantic_interpreter)) -> dict[str, str]:
     return interpreter.health_check()
+
+
+@app.patch("/drafts/{draft_id}", response_model=PublicApplicationDTO)
+async def patch_draft(
+    draft_id: int,
+    payload: DraftPatchRequest,
+    db: Session = Depends(get_db),
+) -> PublicApplicationDTO:
+    app_row = db.get(JobApplication, draft_id)
+    if app_row is None or not app_row.is_draft:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+
+    changes = ApplicationChanges(
+        company=payload.company,
+        roles=payload.roles,
+        status=payload.status,
+        priority=payload.priority,
+        location_mode=payload.location,
+        job_link=payload.job_link,
+        employment_types=payload.employment_types,
+        current_stages=payload.current_stages,
+    )
+    mutation = MutationPayload(
+        operation="patch_draft",
+        target=MutationTarget(draft_id=str(draft_id)),
+        changes=changes,
+    )
+    result = dispatch(mutation, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+
+    # Apply open-ended fields not covered by ApplicationChanges
+    if payload.engaged_days is not None:
+        app_row.engaged_days = payload.engaged_days
+    if payload.next_action is not None:
+        app_row.next_action = payload.next_action
+    if payload.comments is not None:
+        app_row.comments = payload.comments
+    db.commit()
+    db.refresh(app_row)
+
+    return to_public_application(app_row)
+
+
+@app.post("/drafts/{draft_id}/save", response_model=PublicApplicationDTO)
+async def save_draft(draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationDTO:
+    app_row = db.get(JobApplication, draft_id)
+    if app_row is None or not app_row.is_draft:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+
+    mutation = MutationPayload(
+        operation="save_draft",
+        target=MutationTarget(draft_id=str(draft_id)),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(mutation, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+
+    db.refresh(app_row)
+    return to_public_application(app_row)
+
+
+@app.post("/drafts/{draft_id}/discard", status_code=status.HTTP_204_NO_CONTENT)
+async def discard_draft(draft_id: int, db: Session = Depends(get_db)) -> Response:
+    app_row = db.get(JobApplication, draft_id)
+    if app_row is None or not app_row.is_draft:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+
+    mutation = MutationPayload(
+        operation="discard_draft",
+        target=MutationTarget(draft_id=str(draft_id)),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(mutation, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/applications/archived", response_model=list[PublicApplicationDTO])
