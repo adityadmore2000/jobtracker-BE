@@ -294,6 +294,7 @@ class SemanticTranscriptResponse(BaseModel):
     raw_transcript: str
     proposal: SemanticToolCallProposal
     application_id: int | None = None
+    draft_id: str | None = None
     draft: JobApplicationBase | None = None
     drafts: list[JobApplicationCreate] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

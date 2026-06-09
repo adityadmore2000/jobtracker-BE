@@ -208,7 +208,7 @@ async def semantic_interpreter_health(interpreter: OllamaSemanticInterpreter = D
 
 @app.get("/applications", response_model=list[JobApplicationRead])
 async def list_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
-    return db.query(JobApplication).order_by(JobApplication.updated_at.desc()).all()
+    return db.query(JobApplication).filter(JobApplication.is_draft == False).order_by(JobApplication.updated_at.desc()).all()  # noqa: E712
 
 
 @app.get("/asr/hotwords", response_model=AsrHotwordsResponse)
@@ -331,6 +331,11 @@ async def update_application(
     application = db.get(JobApplication, application_id)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.is_draft:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot update a draft application directly. Use the transcript interface.",
+        )
 
     for field, value in payload.model_dump(exclude_unset=True).items():
         setattr(application, field, value)

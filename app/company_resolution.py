@@ -20,7 +20,7 @@ def get_company_alias_by_normalized_name(db: Session, normalized_name: str) -> C
 
 def get_existing_application_company(db: Session, normalized_name: str) -> str | None:
     seen_names: set[str] = set()
-    applications = db.query(JobApplication.company).order_by(JobApplication.id.asc()).all()
+    applications = db.query(JobApplication.company).filter(JobApplication.is_draft == False).order_by(JobApplication.id.asc()).all()  # noqa: E712
     for (company_name,) in applications:
         if company_name in seen_names:
             continue
@@ -66,7 +66,7 @@ def get_application_matches_for_company(db: Session, company_name: str) -> list[
     normalized_name = normalize_company_name(company_name)
     return [
         application
-        for application in db.query(JobApplication).order_by(JobApplication.id.asc()).all()
+        for application in db.query(JobApplication).filter(JobApplication.is_draft == False).order_by(JobApplication.id.asc()).all()  # noqa: E712
         if normalize_company_name(application.company) == normalized_name
     ]
 

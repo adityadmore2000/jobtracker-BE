@@ -25,6 +25,8 @@ class JobApplication(Base):
     engaged_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_action: Mapped[str] = mapped_column(String, nullable=False, default="")
     comments: Mapped[str] = mapped_column(String, nullable=False, default="")
+    is_draft: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    draft_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 

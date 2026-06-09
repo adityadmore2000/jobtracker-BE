@@ -12,6 +12,9 @@ from .constants import (
     STATUS_OPTIONS,
 )
 from .models import BrowserContext, JobApplication
+from .fast_path_parser import try_parse
+from .mutation_dispatcher import dispatch
+from .mutation_schemas import ApplicationChanges, MutationPayload, MutationResult, MutationTarget
 from .schemas import JobApplicationCreate, SemanticTranscriptResponse, TranscriptParseRequest
 from .semantic_interpreter import (
     OllamaSemanticInterpreter,
@@ -32,6 +35,72 @@ from .semantic_schemas import (
 MAX_RECENT_ACTIONS = 3
 
 CLARIFICATION_MISSING_COMPANY = "Which company should I use?"
+
+
+def build_transcript_response_from_mutation(
+    mutation_result: MutationResult,
+    payload: TranscriptParseRequest,
+    proposal: SemanticToolCallProposal,
+    *,
+    metrics=None,
+    warnings: list[str] | None = None,
+    draft: JobApplicationCreate | None = None,
+    draft_id: str | None = None,
+    application_id: int | None = None,
+    needs_confirmation: bool = False,
+    confirmation_kind: str = "none",
+) -> SemanticTranscriptResponse:
+    if mutation_result.clarification_question:
+        return SemanticTranscriptResponse(
+            status="clarification_required",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=warnings or [],
+            clarification_question=mutation_result.clarification_question,
+            interpreter_metrics=metrics,
+        )
+    if not mutation_result.success:
+        return SemanticTranscriptResponse(
+            status="unsupported",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=(warnings or []) + [mutation_result.message],
+            interpreter_metrics=metrics,
+        )
+    operation_map = {
+        "create_draft": "create",
+        "patch_draft": "create",
+        "save_draft": "create",
+        "patch_application": "update",
+        "discard_draft": "none",
+        "ask_clarification": "none",
+    }
+    op = operation_map.get(mutation_result.operation, "none")
+    effective_draft = draft
+    if mutation_result.draft and effective_draft is None:
+        try:
+            effective_draft = JobApplicationCreate.model_validate(mutation_result.draft)
+        except Exception:
+            effective_draft = None
+    # Extract draft_id from mutation result (from DB row) or use the one passed in
+    effective_draft_id = draft_id
+    if effective_draft_id is None and mutation_result.draft and isinstance(mutation_result.draft.get("id"), int):
+        effective_draft_id = str(mutation_result.draft["id"])
+    return SemanticTranscriptResponse(
+        status="preview",
+        operation=op,
+        raw_transcript=payload.transcript,
+        proposal=proposal,
+        draft=effective_draft,
+        draft_id=effective_draft_id,
+        warnings=warnings or [],
+        needs_confirmation=needs_confirmation,
+        confirmation_kind=confirmation_kind,
+        application_id=application_id,
+        interpreter_metrics=metrics,
+    )
 CLARIFICATION_MISSING_PERSISTED_TARGET = "Which company's application do you mean?"
 CLARIFICATION_AMBIGUOUS_APPLICATION = "Multiple applications match this company. Specify the role."
 CLARIFICATION_NO_ACTIVE_DRAFT = "There is no active draft to save."
@@ -72,6 +141,8 @@ def build_context_payload(payload: TranscriptParseRequest) -> dict[str, object]:
     bounded_recent_actions = recent_actions[-MAX_RECENT_ACTIONS:] if isinstance(recent_actions, list) else []
     active_application = raw_context.get("active_application")
     active_draft = raw_context.get("active_draft")
+    draft_id_raw = raw_context.get("draft_id")
+    draft_id = str(draft_id_raw) if draft_id_raw is not None else None
     return {
         "active_application_id": (
             active_application.get("application_id")
@@ -82,6 +153,7 @@ def build_context_payload(payload: TranscriptParseRequest) -> dict[str, object]:
         "active_company": raw_context.get("active_company"),
         "active_role": raw_context.get("active_role"),
         "recent_actions": bounded_recent_actions,
+        "draft_id": draft_id,
     }
 
 
@@ -545,16 +617,40 @@ def handle_patch_active_draft(
         warnings.append(f"Context note: {note}")
     final_confirmation_kind = draft_confirmation_kind if draft_confirmation_kind != "none" else confirmation_kind
 
-    return SemanticTranscriptResponse(
-        status="preview",
-        operation="create",
-        raw_transcript=payload.transcript,
-        proposal=proposal,
-        draft=draft,
+    incoming_draft_id = context.get("draft_id")
+    if isinstance(incoming_draft_id, str) and incoming_draft_id:
+        operation = "patch_draft"
+        target = MutationTarget(draft_id=incoming_draft_id)
+    else:
+        operation = "create_draft"
+        target = MutationTarget()
+
+    mutation_payload = MutationPayload(
+        operation=operation,
+        target=target,
+        changes=ApplicationChanges(
+            company=draft.company,
+            role=draft.roles_json[0] if draft.roles_json else None,
+            status=draft.status or None,
+            priority=draft.priority or None,
+            location_mode=draft.location or None,
+            job_link=draft.job_link or None,
+            employment_type=draft.employment_types_json[0] if draft.employment_types_json else None,
+            current_stage=draft.current_stages_json[0] if draft.current_stages_json else None,
+        ),
+    )
+    mutation_result = dispatch(mutation_payload, db)
+    effective_draft_id = str(mutation_result.draft["id"]) if mutation_result.draft and isinstance(mutation_result.draft.get("id"), int) else incoming_draft_id
+    return build_transcript_response_from_mutation(
+        mutation_result,
+        payload,
+        proposal,
+        metrics=metrics,
         warnings=warnings,
+        draft=draft,
+        draft_id=effective_draft_id,
         needs_confirmation=final_confirmation_kind == "context",
         confirmation_kind=final_confirmation_kind,
-        interpreter_metrics=metrics,
     )
 
 
@@ -623,15 +719,28 @@ def handle_preview_existing_application_update(
             interpreter_metrics=metrics,
         )
 
-    return SemanticTranscriptResponse(
-        status="preview",
-        operation="update",
-        raw_transcript=payload.transcript,
-        proposal=proposal,
-        application_id=application.id,
-        draft=preview,
+    mutation_payload = MutationPayload(
+        operation="patch_application",
+        target=MutationTarget(application_id=application.id),
+        changes=ApplicationChanges(
+            status=validated_fields.status or None,
+            priority=validated_fields.priority or None,
+            location_mode=validated_fields.location or None,
+            job_link=validated_fields.job_link or None,
+            role=validated_fields.roles[0] if validated_fields.roles else None,
+            employment_type=validated_fields.employment_types[0] if validated_fields.employment_types else None,
+            current_stage=validated_fields.current_stages[0] if validated_fields.current_stages else None,
+        ),
+    )
+    mutation_result = dispatch(mutation_payload, db)
+    return build_transcript_response_from_mutation(
+        mutation_result,
+        payload,
+        proposal,
+        metrics=metrics,
         warnings=target_warnings,
-        interpreter_metrics=metrics,
+        draft=preview,
+        application_id=application.id,
     )
 
 
@@ -640,9 +749,22 @@ def handle_request_draft_save(
     proposal: SemanticToolCallProposal,
     _arguments: RequestDraftSaveArguments,
     metrics,
+    db: Session | None = None,
 ) -> SemanticTranscriptResponse:
     context = build_context_payload(payload)
-    if build_context_draft(context) is None:
+    context_draft = build_context_draft(context)
+    if context_draft is None:
+        mutation_payload = MutationPayload(
+            operation="ask_clarification",
+            target=MutationTarget(),
+            changes=ApplicationChanges(),
+            notes_to_append=[CLARIFICATION_NO_ACTIVE_DRAFT],
+        )
+        mutation_result = dispatch(mutation_payload, db) if db else None
+        if mutation_result:
+            return build_transcript_response_from_mutation(
+                mutation_result, payload, proposal, metrics=metrics, warnings=[]
+            )
         return SemanticTranscriptResponse(
             status="clarification_required",
             operation="none",
@@ -653,12 +775,32 @@ def handle_request_draft_save(
             interpreter_metrics=metrics,
         )
 
+    draft_id = context.get("draft_id")
+    draft_id_str = str(draft_id) if draft_id is not None else None
+    mutation_payload = MutationPayload(
+        operation="save_draft",
+        target=MutationTarget(draft_id=draft_id_str),
+        changes=ApplicationChanges(
+            company=context_draft.company,
+            role=context_draft.roles_json[0] if context_draft.roles_json else None,
+        ),
+    )
+    if db is not None:
+        mutation_result = dispatch(mutation_payload, db)
+        if mutation_result.success and mutation_result.application:
+            saved_draft_id = None
+        else:
+            saved_draft_id = draft_id_str
+    else:
+        mutation_result = None
+        saved_draft_id = draft_id_str
     return SemanticTranscriptResponse(
         status="preview",
         operation="create",
         raw_transcript=payload.transcript,
         proposal=proposal,
-        draft=build_context_draft(context),
+        draft=context_draft,
+        draft_id=saved_draft_id,
         warnings=["Use the existing Save action to persist this draft."],
         needs_confirmation=True,
         interpreter_metrics=metrics,
@@ -673,36 +815,42 @@ def handle_attach_latest_browser_context(
 ) -> SemanticTranscriptResponse:
     context_payload = build_context_payload(payload)
     if build_context_draft(context_payload) is None:
-        return SemanticTranscriptResponse(
-            status="clarification_required",
-            operation="none",
-            raw_transcript=payload.transcript,
-            proposal=proposal,
-            warnings=[],
-            clarification_question="There is no active draft to attach the current link to.",
-            interpreter_metrics=metrics,
+        question = "There is no active draft to attach the current link to."
+        mutation_payload = MutationPayload(
+            operation="ask_clarification",
+            target=MutationTarget(),
+            changes=ApplicationChanges(),
+            notes_to_append=[question],
+        )
+        mutation_result = dispatch(mutation_payload, db)
+        return build_transcript_response_from_mutation(
+            mutation_result, payload, proposal, metrics=metrics, warnings=[]
         )
 
-    context = db.query(BrowserContext).order_by(BrowserContext.captured_at.desc(), BrowserContext.id.desc()).first()
-    if context is None:
-        return SemanticTranscriptResponse(
-            status="clarification_required",
-            operation="none",
-            raw_transcript=payload.transcript,
-            proposal=proposal,
-            warnings=["No browser context is available."],
-            clarification_question="Open a job page first, then try again.",
-            interpreter_metrics=metrics,
+    browser_context = db.query(BrowserContext).order_by(BrowserContext.captured_at.desc(), BrowserContext.id.desc()).first()
+    if browser_context is None:
+        question = "Open a job page first, then try again."
+        mutation_payload = MutationPayload(
+            operation="ask_clarification",
+            target=MutationTarget(),
+            changes=ApplicationChanges(),
+            notes_to_append=[question],
+        )
+        mutation_result = dispatch(mutation_payload, db)
+        return build_transcript_response_from_mutation(
+            mutation_result, payload, proposal, metrics=metrics, warnings=["No browser context is available."]
         )
 
-    question = f'Latest browser context: "{context.page_title}" at {context.url}. Which tracker fields should I fill from it?'
-    return SemanticTranscriptResponse(
-        status="clarification_required",
-        operation="none",
-        raw_transcript=payload.transcript,
-        proposal=proposal,
-        clarification_question=question,
-        interpreter_metrics=metrics,
+    question = f'Latest browser context: "{browser_context.page_title}" at {browser_context.url}. Which tracker fields should I fill from it?'
+    mutation_payload = MutationPayload(
+        operation="ask_clarification",
+        target=MutationTarget(),
+        changes=ApplicationChanges(),
+        notes_to_append=[question],
+    )
+    mutation_result = dispatch(mutation_payload, db)
+    return build_transcript_response_from_mutation(
+        mutation_result, payload, proposal, metrics=metrics, warnings=[]
     )
 
 
@@ -711,7 +859,19 @@ def handle_ask_clarification(
     proposal: SemanticToolCallProposal,
     arguments: AskClarificationArguments,
     metrics,
+    db: Session | None = None,
 ) -> SemanticTranscriptResponse:
+    mutation_payload = MutationPayload(
+        operation="ask_clarification",
+        target=MutationTarget(),
+        changes=ApplicationChanges(),
+        notes_to_append=[arguments.question],
+    )
+    if db is not None:
+        mutation_result = dispatch(mutation_payload, db)
+        return build_transcript_response_from_mutation(
+            mutation_result, payload, proposal, metrics=metrics, warnings=[]
+        )
     return SemanticTranscriptResponse(
         status="clarification_required",
         operation="none",
@@ -1122,12 +1282,26 @@ def reconcile_explicit_company_candidates(
     return _proposal_with_clarification(CLARIFICATION_CONFLICTING_COMPANY)
 
 
+def _fast_path_proposal() -> SemanticToolCallProposal:
+    return SemanticToolCallProposal()
+
+
 def interpret_transcript_command(
     db: Session,
     payload: TranscriptParseRequest,
     interpreter: OllamaSemanticInterpreter,
 ) -> SemanticTranscriptResponse:
     context, explicit_known_companies = build_interpreter_context(db, payload)
+
+    fast_path_result = try_parse(payload.transcript, context)
+    if fast_path_result is not None:
+        mutation_result = dispatch(fast_path_result, db)
+        proposal = _fast_path_proposal()
+        return build_transcript_response_from_mutation(
+            mutation_result,
+            payload,
+            proposal,
+        )
     # OLLAMA_MAX_TOOL_TURNS caps how many times interpret() may run for one transcript
     # request (initial call plus any clarification/schema-repair retries). Default is 2.
     max_tool_turns = max(1, interpreter.settings.max_tool_turns)
@@ -1273,12 +1447,12 @@ def interpret_transcript_command(
         return handle_preview_existing_application_update(db, payload, proposal, arguments, metrics)
     if proposal.tool_name == "request_draft_save":
         arguments = validated_arguments
-        return handle_request_draft_save(payload, proposal, arguments, metrics)
+        return handle_request_draft_save(payload, proposal, arguments, metrics, db=db)
     if proposal.tool_name == "attach_latest_browser_context":
         return handle_attach_latest_browser_context(db, payload, proposal, metrics)
     if proposal.tool_name == "ask_clarification":
         arguments = validated_arguments
-        return handle_ask_clarification(payload, proposal, arguments, metrics)
+        return handle_ask_clarification(payload, proposal, arguments, metrics, db=db)
 
     return SemanticTranscriptResponse(
         status="unsupported",
