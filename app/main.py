@@ -31,6 +31,8 @@ from .migrations import run_startup_migrations_if_enabled
 from .models import ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, CompanyAlias, JobApplication
 from .mutation_dispatcher import dispatch
 from .mutation_schemas import MutationPayload, MutationTarget, ApplicationChanges
+from .public_schemas import PublicApplicationDTO, PublicTranscriptResponse
+from .transcript_response_adapter import to_public_application, to_public_transcript_response
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
     ApplicationCreateCandidateRequest,
@@ -208,26 +210,28 @@ async def semantic_interpreter_health(interpreter: OllamaSemanticInterpreter = D
     return interpreter.health_check()
 
 
-@app.get("/applications/archived", response_model=list[JobApplicationRead])
-async def list_archived_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
-    return (
+@app.get("/applications/archived", response_model=list[PublicApplicationDTO])
+async def list_archived_applications(db: Session = Depends(get_db)) -> list[PublicApplicationDTO]:
+    rows = (
         db.query(JobApplication)
         .filter(JobApplication.is_draft == False)  # noqa: E712
         .filter(JobApplication.archived_at != None)  # noqa: E711
         .order_by(JobApplication.archived_at.desc())
         .all()
     )
+    return [to_public_application(row) for row in rows]
 
 
-@app.get("/applications", response_model=list[JobApplicationRead])
-async def list_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
-    return (
+@app.get("/applications", response_model=list[PublicApplicationDTO])
+async def list_applications(db: Session = Depends(get_db)) -> list[PublicApplicationDTO]:
+    rows = (
         db.query(JobApplication)
         .filter(JobApplication.is_draft == False)  # noqa: E712
         .filter(JobApplication.archived_at == None)  # noqa: E711
         .order_by(JobApplication.updated_at.desc())
         .all()
     )
+    return [to_public_application(row) for row in rows]
 
 
 @app.get("/asr/hotwords", response_model=AsrHotwordsResponse)
@@ -267,13 +271,14 @@ async def get_latest_browser_context(db: Session = Depends(get_db)) -> dict[str,
     return {"context": context}
 
 
-@app.post("/transcript/parse", response_model=SemanticTranscriptResponse)
+@app.post("/transcript/parse", response_model=PublicTranscriptResponse)
 async def parse_transcript_command(
     payload: TranscriptParseRequest,
     db: Session = Depends(get_db),
     interpreter: OllamaSemanticInterpreter = Depends(get_semantic_interpreter),
-) -> SemanticTranscriptResponse:
-    return interpret_transcript_command(db, payload, interpreter)
+) -> PublicTranscriptResponse:
+    internal = interpret_transcript_command(db, payload, interpreter)
+    return to_public_transcript_response(internal)
 
 
 @app.post("/applications", response_model=JobApplicationRead, status_code=status.HTTP_201_CREATED)

@@ -94,6 +94,10 @@ def build_transcript_response_from_mutation(
     effective_draft_id = draft_id
     if effective_draft_id is None and mutation_result.draft and isinstance(mutation_result.draft.get("id"), int):
         effective_draft_id = str(mutation_result.draft["id"])
+    # Extract application_id from mutation result when not explicitly provided
+    effective_application_id = application_id
+    if effective_application_id is None and mutation_result.application and isinstance(mutation_result.application.get("id"), int):
+        effective_application_id = mutation_result.application["id"]
     return SemanticTranscriptResponse(
         status="preview",
         operation=op,
@@ -104,7 +108,7 @@ def build_transcript_response_from_mutation(
         warnings=warnings or [],
         needs_confirmation=needs_confirmation,
         confirmation_kind=confirmation_kind,
-        application_id=application_id,
+        application_id=effective_application_id,
         interpreter_metrics=metrics,
     )
 CLARIFICATION_MISSING_PERSISTED_TARGET = "Which company's application do you mean?"

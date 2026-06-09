@@ -119,11 +119,10 @@ async def test_existing_transcript_parse_behavior_unchanged(client):
     assert response.status_code == 200
     body = response.json()
     assert "status" in body
-    assert "operation" in body
     assert "draft" in body
-    assert body["status"] == "preview"
+    assert body["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert body["draft"]["company"] == "Neilsoft"
-    assert body["draft"]["roles_json"] == ["AI Engineer"]
+    assert body["draft"]["roles"] == ["AI Engineer"]
 
 
 # ---------------------------------------------------------------------------

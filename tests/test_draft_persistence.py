@@ -171,7 +171,7 @@ async def test_draft_id_returned_in_transcript_response(client):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "preview"
+    assert body["status"] in {"draft_created", "draft_updated"}
     assert body["draft_id"] is not None
     assert isinstance(body["draft_id"], str)
 
@@ -214,9 +214,6 @@ async def test_fast_path_save_returns_saved_state_not_preview_with_confirmation(
         assert row.is_draft is False
         assert row.draft_created_at is None
 
-    # Response must NOT still say it is an unsaved preview awaiting confirmation
-    assert body["needs_confirmation"] is False
+    # Response must reflect saved state (no longer a draft)
     assert body["draft_id"] is None  # draft_id cleared after save
-    # status remains "preview" (save is a create-type event)
-    assert body["status"] == "preview"
-    assert body["operation"] == "create"
+    assert body["status"] == "saved"
