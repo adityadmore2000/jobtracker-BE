@@ -10,6 +10,9 @@ from .constants import (
     ALLOWED_LOCATIONS,
     ALLOWED_PRIORITIES,
     STATUS_OPTIONS,
+    EMPLOYMENT_TYPE_ALIASES,
+    LOCATION_ALIASES,
+    normalize_status_value,
 )
 from .models import BrowserContext, JobApplication
 from .fast_path_parser import try_parse
@@ -76,6 +79,9 @@ def build_transcript_response_from_mutation(
         "patch_application": "update",
         "discard_draft": "none",
         "ask_clarification": "none",
+        "append_note": "none",
+        "archive_application": "none",
+        "restore_application": "none",
     }
     op = operation_map.get(mutation_result.operation, "none")
     effective_draft = draft
@@ -172,11 +178,7 @@ def build_interpreter_context(
 def normalize_status(value: str | None) -> str | None:
     if value is None:
         return None
-    normalized = _normalize_lookup_text(value)
-    for option in STATUS_OPTIONS:
-        if _normalize_lookup_text(option) == normalized:
-            return option
-    return None
+    return normalize_status_value(value)
 
 
 def normalize_priority(value: str | None) -> str | None:
@@ -205,24 +207,6 @@ def normalize_role_title(value: str) -> str:
     return " ".join(value.strip().split())
 
 
-EMPLOYMENT_TYPE_ALIASES = {
-    "internship": "Internship",
-    "intern": "Internship",
-    "full time": "Full Time",
-    "fulltime": "Full Time",
-    "part time": "Part Time",
-    "parttime": "Part Time",
-}
-
-LOCATION_ALIASES = {
-    "remote": "remote",
-    "work from home": "remote",
-    "wfh": "remote",
-    "hybrid": "hybrid",
-    "onsite": "onsite",
-    "on site": "onsite",
-    "on-site": "onsite",
-}
 
 
 def normalize_roles(values: list[str] | None, *, tool_name: str | None = None) -> list[str] | None:
@@ -630,13 +614,13 @@ def handle_patch_active_draft(
         target=target,
         changes=ApplicationChanges(
             company=draft.company,
-            role=draft.roles_json[0] if draft.roles_json else None,
+            roles=list(draft.roles_json) if draft.roles_json else None,
             status=draft.status or None,
             priority=draft.priority or None,
             location_mode=draft.location or None,
             job_link=draft.job_link or None,
-            employment_type=draft.employment_types_json[0] if draft.employment_types_json else None,
-            current_stage=draft.current_stages_json[0] if draft.current_stages_json else None,
+            employment_types=list(draft.employment_types_json) if draft.employment_types_json else None,
+            current_stages=list(draft.current_stages_json) if draft.current_stages_json else None,
         ),
     )
     mutation_result = dispatch(mutation_payload, db)
@@ -727,9 +711,9 @@ def handle_preview_existing_application_update(
             priority=validated_fields.priority or None,
             location_mode=validated_fields.location or None,
             job_link=validated_fields.job_link or None,
-            role=validated_fields.roles[0] if validated_fields.roles else None,
-            employment_type=validated_fields.employment_types[0] if validated_fields.employment_types else None,
-            current_stage=validated_fields.current_stages[0] if validated_fields.current_stages else None,
+            roles=list(validated_fields.roles) if validated_fields.roles else None,
+            employment_types=list(validated_fields.employment_types) if validated_fields.employment_types else None,
+            current_stages=list(validated_fields.current_stages) if validated_fields.current_stages else None,
         ),
     )
     mutation_result = dispatch(mutation_payload, db)
@@ -782,27 +766,39 @@ def handle_request_draft_save(
         target=MutationTarget(draft_id=draft_id_str),
         changes=ApplicationChanges(
             company=context_draft.company,
-            role=context_draft.roles_json[0] if context_draft.roles_json else None,
+            roles=list(context_draft.roles_json) if context_draft.roles_json else None,
         ),
     )
     if db is not None:
         mutation_result = dispatch(mutation_payload, db)
         if mutation_result.success and mutation_result.application:
-            saved_draft_id = None
-        else:
-            saved_draft_id = draft_id_str
-    else:
-        mutation_result = None
-        saved_draft_id = draft_id_str
+            # Draft was saved: return a response that truthfully reflects saved state.
+            # draft_id is cleared (no longer a draft), application_id is set.
+            saved_app_id = mutation_result.application.get("id")
+            return SemanticTranscriptResponse(
+                status="preview",
+                operation="create",
+                raw_transcript=payload.transcript,
+                proposal=proposal,
+                draft=context_draft,
+                draft_id=None,
+                application_id=saved_app_id,
+                warnings=[],
+                needs_confirmation=False,
+                interpreter_metrics=metrics,
+            )
+        # Save failed (e.g. no draft_id in context, or draft not found): surface error.
+        return build_transcript_response_from_mutation(
+            mutation_result, payload, proposal, metrics=metrics, warnings=[]
+        )
+    # db is None (test-only path without DB): return clarification that we cannot save.
     return SemanticTranscriptResponse(
-        status="preview",
-        operation="create",
+        status="clarification_required",
+        operation="none",
         raw_transcript=payload.transcript,
         proposal=proposal,
-        draft=context_draft,
-        draft_id=saved_draft_id,
-        warnings=["Use the existing Save action to persist this draft."],
-        needs_confirmation=True,
+        warnings=[],
+        clarification_question=CLARIFICATION_NO_ACTIVE_DRAFT,
         interpreter_metrics=metrics,
     )
 

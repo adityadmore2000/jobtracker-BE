@@ -88,13 +88,13 @@ def test_on_site_variant_recognized():
 def test_mark_applied_produces_status_applied():
     result = try_parse("mark applied", {"draft_id": "1"})
     assert result is not None
-    assert result.changes.status == "Applied"
+    assert result.changes.status == "applied"
 
 
 def test_already_applied_recognized():
     result = try_parse("already applied", {"draft_id": "1"})
     assert result is not None
-    assert result.changes.status == "Applied"
+    assert result.changes.status == "applied"
 
 
 def test_unrecognized_transcript_returns_none():

@@ -245,7 +245,7 @@ def test_normalize_semantic_field_patch_argument_shape_converts_high_to_uppercas
 def test_normalize_semantic_field_patch_argument_shape_converts_applied_to_canonical_status():
     normalized = normalize_semantic_field_patch_argument_shape({"status": "applied"})
 
-    assert normalized == {"status": "Applied"}
+    assert normalized == {"status": "applied"}
 
 
 def test_normalize_semantic_field_patch_argument_shape_promotes_current_stage_scalar_to_array():
@@ -1381,7 +1381,7 @@ async def test_parse_transcript_known_company_reconciles_missing_company_for_per
 
 @pytest.mark.anyio
 async def test_parse_transcript_preview_existing_application_update_for_status_change(client):
-    created = await create_record(client, REALISTIC_RECORD | {"company": "Neilsoft", "status": "Interested"})
+    created = await create_record(client, REALISTIC_RECORD | {"company": "Neilsoft", "status": "in_touch"})
     interpreter = FakeInterpreter(
         proposal=proposal(
             tool_name="preview_existing_application_update",
@@ -1398,7 +1398,7 @@ async def test_parse_transcript_preview_existing_application_update_for_status_c
     assert parsed["status"] == "preview"
     assert parsed["operation"] == "update"
     assert parsed["application_id"] == created["id"]
-    assert parsed["draft"]["status"] == "Rejected"
+    assert parsed["draft"]["status"] == "rejected"
 
 
 @pytest.mark.anyio
@@ -1634,7 +1634,7 @@ async def test_parse_transcript_preview_existing_application_update_normalizes_s
 
     assert parsed["status"] == "preview"
     assert parsed["application_id"] == created["id"]
-    assert parsed["draft"]["status"] == "Applied"
+    assert parsed["draft"]["status"] == "applied"
 
 
 @pytest.mark.anyio
@@ -1885,7 +1885,8 @@ async def test_parse_transcript_request_draft_save_is_non_persistent(client):
 
 
 @pytest.mark.anyio
-async def test_parse_transcript_request_draft_save_returns_preview_when_active_draft_exists(client):
+async def test_parse_transcript_request_draft_save_without_draft_id_returns_error(client):
+    """save command with active_draft context but no draft_id: no DB row → save fails."""
     interpreter = FakeInterpreter(
         proposal=proposal(
             tool_name="request_draft_save",
@@ -1914,11 +1915,10 @@ async def test_parse_transcript_request_draft_save_returns_preview_when_active_d
         },
     )
 
-    assert parsed["status"] == "preview"
-    assert parsed["operation"] == "create"
-    assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["needs_confirmation"] is True
-    assert "Use the existing Save action" in parsed["warnings"][0]
+    # Without a draft_id, there is no DB row to save.
+    # The dispatcher returns failure → response is unsupported or clarification.
+    assert parsed["status"] in {"unsupported", "clarification_required"}
+    assert parsed["needs_confirmation"] is False
 
 
 @pytest.mark.anyio
@@ -2075,9 +2075,9 @@ async def test_fetch_application_by_id(client):
 @pytest.mark.anyio
 async def test_update_application(client):
     created = await create_record(client)
-    response = await client.patch(f"/applications/{created['id']}", json={"status": "interviewing"})
+    response = await client.patch(f"/applications/{created['id']}", json={"status": "applied"})
     assert response.status_code == 200
-    assert response.json()["status"] == "interviewing"
+    assert response.json()["status"] == "applied"
 
 
 @pytest.mark.anyio
@@ -2091,19 +2091,20 @@ async def test_update_status_preserves_current_stage(client):
         },
     )
 
-    updated = await client.patch(f"/applications/{created['id']}", json={"status": "interview"})
+    updated = await client.patch(f"/applications/{created['id']}", json={"status": "applied"})
     assert updated.status_code == 200
-    assert updated.json()["status"] == "interview"
+    assert updated.json()["status"] == "applied"
     assert_bootcoding_current_stages(updated.json())
 
     fetched = await client.get(f"/applications/{created['id']}")
     assert fetched.status_code == 200
-    assert fetched.json()["status"] == "interview"
+    assert fetched.json()["status"] == "applied"
     assert_bootcoding_current_stages(fetched.json())
 
 
 @pytest.mark.anyio
-async def test_update_status_accepts_custom_string(client):
+async def test_update_status_rejects_unknown_string(client):
+    """Direct PATCH must reject custom/unknown status values — controlled enum only."""
     created = await create_record(client, REALISTIC_RECORD | {"status": "applied"})
 
     updated = await client.patch(
@@ -2111,8 +2112,7 @@ async def test_update_status_accepts_custom_string(client):
         json={"status": "waiting for recruiter response"},
     )
 
-    assert updated.status_code == 200
-    assert updated.json()["status"] == "waiting for recruiter response"
+    assert updated.status_code == 422
 
 
 @pytest.mark.anyio
@@ -2303,7 +2303,7 @@ async def test_current_stage_remains_exactly_what_user_submitted(client):
 @pytest.mark.anyio
 async def test_changing_status_does_not_change_current_stage(client):
     created = await create_record(client)
-    response = await client.patch(f"/applications/{created['id']}", json={"status": "followed up"})
+    response = await client.patch(f"/applications/{created['id']}", json={"status": "rejected"})
     assert response.status_code == 200
     assert_bootcoding_current_stages(response.json())
 
@@ -2331,7 +2331,7 @@ async def test_current_stage_survives_fetch_list_status_and_comments_updates(cli
     assert listed.status_code == 200
     assert_bootcoding_current_stages(listed.json()[0])
 
-    status_updated = await client.patch(f"/applications/{created['id']}", json={"status": "custom status"})
+    status_updated = await client.patch(f"/applications/{created['id']}", json={"status": "accepted"})
     assert status_updated.status_code == 200
     assert_bootcoding_current_stages(status_updated.json())
 

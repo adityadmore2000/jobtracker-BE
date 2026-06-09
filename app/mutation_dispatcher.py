@@ -10,6 +10,7 @@ from .constants import (
     ALLOWED_LOCATIONS,
     ALLOWED_PRIORITIES,
     STATUS_OPTIONS,
+    normalize_status_value,
 )
 from .models import ApplicationEvent, ApplicationNote, JobApplication
 from .mutation_schemas import (
@@ -22,6 +23,26 @@ from .mutation_schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Every operation in ALLOWED_OPERATIONS must appear here with an intentional mapping.
+# Operations that produce no SemanticTranscriptResponse "operation" value map to "none".
+_OPERATION_TO_TRANSCRIPT_OP: dict[str, str] = {
+    "create_draft": "create",
+    "patch_draft": "create",
+    "save_draft": "create",
+    "patch_application": "update",
+    "discard_draft": "none",
+    "ask_clarification": "none",
+    "append_note": "none",       # note-only mutation; no draft/application preview needed
+    "archive_application": "none",
+    "restore_application": "none",
+}
+
+assert set(_OPERATION_TO_TRANSCRIPT_OP.keys()) == ALLOWED_OPERATIONS, (
+    "OPERATION_TO_TRANSCRIPT_OP keys must exactly match ALLOWED_OPERATIONS. "
+    f"Missing: {ALLOWED_OPERATIONS - set(_OPERATION_TO_TRANSCRIPT_OP.keys())} "
+    f"Extra: {set(_OPERATION_TO_TRANSCRIPT_OP.keys()) - ALLOWED_OPERATIONS}"
+)
+
 
 def _error(operation: str, message: str) -> MutationResult:
     return MutationResult(success=False, operation=operation, message=message)
@@ -32,12 +53,20 @@ def _validate_enum_fields(changes: ApplicationChanges, operation: str) -> Mutati
         return _error(operation, f"Invalid priority '{changes.priority}'. Allowed: {ALLOWED_PRIORITIES}")
     if changes.location_mode is not None and changes.location_mode not in ALLOWED_LOCATIONS:
         return _error(operation, f"Invalid location_mode '{changes.location_mode}'. Allowed: {ALLOWED_LOCATIONS}")
-    if changes.status is not None and changes.status not in STATUS_OPTIONS and changes.status != "":
-        return _error(operation, f"Invalid status '{changes.status}'. Allowed: {STATUS_OPTIONS}")
-    if changes.employment_type is not None and changes.employment_type not in ALLOWED_EMPLOYMENT_TYPES:
-        return _error(operation, f"Invalid employment_type '{changes.employment_type}'. Allowed: {ALLOWED_EMPLOYMENT_TYPES}")
-    if changes.current_stage is not None and changes.current_stage not in ALLOWED_CURRENT_STAGES:
-        return _error(operation, f"Invalid current_stage '{changes.current_stage}'. Allowed: {ALLOWED_CURRENT_STAGES}")
+    if changes.status is not None and changes.status != "":
+        canonical = normalize_status_value(changes.status)
+        if canonical is None:
+            return _error(operation, f"Invalid status '{changes.status}'. Allowed: {STATUS_OPTIONS}")
+        # Normalise in-place so downstream sees the canonical value
+        changes.status = canonical
+    if changes.employment_types is not None:
+        invalid = [v for v in changes.employment_types if v not in ALLOWED_EMPLOYMENT_TYPES]
+        if invalid:
+            return _error(operation, f"Invalid employment_type(s) {invalid}. Allowed: {ALLOWED_EMPLOYMENT_TYPES}")
+    if changes.current_stages is not None:
+        invalid = [v for v in changes.current_stages if v not in ALLOWED_CURRENT_STAGES]
+        if invalid:
+            return _error(operation, f"Invalid current_stage(s) {invalid}. Allowed: {ALLOWED_CURRENT_STAGES}")
     return None
 
 
@@ -73,8 +102,8 @@ def _note_to_dict(note: ApplicationNote) -> dict:
 def _apply_changes_to_application(app: JobApplication, changes: ApplicationChanges) -> None:
     if changes.company is not None:
         app.company = changes.company
-    if changes.role is not None:
-        app.roles_json = [changes.role]
+    if changes.roles is not None:
+        app.roles_json = list(changes.roles)
     if changes.status is not None:
         app.status = changes.status
     if changes.priority is not None:
@@ -83,10 +112,10 @@ def _apply_changes_to_application(app: JobApplication, changes: ApplicationChang
         app.location = changes.location_mode
     if changes.job_link is not None:
         app.job_link = changes.job_link
-    if changes.employment_type is not None:
-        app.employment_types_json = [changes.employment_type]
-    if changes.current_stage is not None:
-        app.current_stages_json = [changes.current_stage]
+    if changes.employment_types is not None:
+        app.employment_types_json = list(changes.employment_types)
+    if changes.current_stages is not None:
+        app.current_stages_json = list(changes.current_stages)
 
 
 def _append_notes(application_id: int, notes: List[str], db: Session) -> List[ApplicationNote]:
@@ -124,12 +153,12 @@ def handle_create_draft(payload: MutationPayload, db: Session) -> MutationResult
 
     app = JobApplication(
         company=payload.changes.company,
-        roles_json=[payload.changes.role] if payload.changes.role else [],
-        employment_types_json=[payload.changes.employment_type] if payload.changes.employment_type else [],
+        roles_json=list(payload.changes.roles) if payload.changes.roles else [],
+        employment_types_json=list(payload.changes.employment_types) if payload.changes.employment_types else [],
         job_link=payload.changes.job_link or "",
         location=payload.changes.location_mode or "",
         status=payload.changes.status or "",
-        current_stages_json=[payload.changes.current_stage] if payload.changes.current_stage else [],
+        current_stages_json=list(payload.changes.current_stages) if payload.changes.current_stages else [],
         priority=payload.changes.priority or "",
         engaged_days=0,
         next_action="",
@@ -213,33 +242,31 @@ def handle_save_draft(payload: MutationPayload, db: Session) -> MutationResult:
             notes=notes_list,
         )
 
-    if not payload.changes.company:
-        return _error("save_draft", "Draft must have company to be saved.")
-    if not payload.changes.role:
-        return _error("save_draft", "Draft must have role to be saved.")
-    draft = _changes_to_dict(payload.changes)
-    return MutationResult(
-        success=True,
-        operation="save_draft",
-        message="Draft is ready to save.",
-        draft=draft,
-        requires_confirmation=True,
-        confirmation_kind="save",
-    )
+    # save_draft without a draft_id: no DB row exists yet; nothing to save.
+    return _error("save_draft", "No active draft to save. Provide a draft_id.")
 
 
 def handle_discard_draft(payload: MutationPayload, db: Session) -> MutationResult:
-    if payload.target.draft_id is not None:
-        try:
-            draft_id = int(payload.target.draft_id)
-        except (ValueError, TypeError):
-            return _error("discard_draft", f"Invalid draft_id '{payload.target.draft_id}'")
-        app = db.get(JobApplication, draft_id)
-        if app is None or not app.is_draft:
-            return _error("discard_draft", f"Draft with id {draft_id} not found")
-        db.delete(app)
-        db.commit()
+    if payload.target.draft_id is None:
+        # Deliberate explicit no-op: there is no draft in context to discard.
+        # Return truthful success rather than silently implying something was deleted.
+        return MutationResult(
+            success=True,
+            operation="discard_draft",
+            message="No active draft to discard.",
+        )
 
+    try:
+        draft_id = int(payload.target.draft_id)
+    except (ValueError, TypeError):
+        return _error("discard_draft", f"Invalid draft_id '{payload.target.draft_id}'")
+    app = db.get(JobApplication, draft_id)
+    if app is None or not app.is_draft:
+        return _error("discard_draft", f"Draft with id {draft_id} not found")
+    db.delete(app)
+    db.commit()
+    # Note: discard hard-deletes the row without emitting an ApplicationEvent.
+    # This is intentional — discarded drafts are ephemeral and not tracked in the timeline.
     return MutationResult(
         success=True,
         operation="discard_draft",
@@ -259,6 +286,8 @@ def handle_patch_application(payload: MutationPayload, db: Session) -> MutationR
         return _error("patch_application", f"Application {payload.target.application_id} not found")
     if app.is_draft:
         return _error("patch_application", "Cannot patch a draft application via patch_application. Use patch_draft.")
+    if app.archived_at is not None:
+        return _error("patch_application", f"Application {payload.target.application_id} is archived and cannot be patched.")
 
     # Capture old values before applying changes
     old_status = app.status
@@ -283,12 +312,12 @@ def handle_patch_application(payload: MutationPayload, db: Session) -> MutationR
         _append_event(app.id, "field_changed", {"field": "job_link", "from": old_job_link, "to": app.job_link}, db)
     if payload.changes.company is not None and app.company != old_company:
         _append_event(app.id, "field_changed", {"field": "company", "from": old_company, "to": app.company}, db)
-    if payload.changes.role is not None and app.roles_json != old_roles:
-        _append_event(app.id, "field_changed", {"field": "role", "from": old_roles, "to": app.roles_json}, db)
-    if payload.changes.employment_type is not None and app.employment_types_json != old_employment_types:
-        _append_event(app.id, "field_changed", {"field": "employment_type", "from": old_employment_types, "to": app.employment_types_json}, db)
-    if payload.changes.current_stage is not None and app.current_stages_json != old_current_stages:
-        _append_event(app.id, "field_changed", {"field": "current_stage", "from": old_current_stages, "to": app.current_stages_json}, db)
+    if payload.changes.roles is not None and app.roles_json != old_roles:
+        _append_event(app.id, "field_changed", {"field": "roles", "from": old_roles, "to": app.roles_json}, db)
+    if payload.changes.employment_types is not None and app.employment_types_json != old_employment_types:
+        _append_event(app.id, "field_changed", {"field": "employment_types", "from": old_employment_types, "to": app.employment_types_json}, db)
+    if payload.changes.current_stages is not None and app.current_stages_json != old_current_stages:
+        _append_event(app.id, "field_changed", {"field": "current_stages", "from": old_current_stages, "to": app.current_stages_json}, db)
 
     if payload.notes_to_append:
         created_notes = _append_notes(app.id, payload.notes_to_append, db)

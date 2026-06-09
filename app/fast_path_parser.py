@@ -1,7 +1,7 @@
 import re
 from typing import TYPE_CHECKING
 
-from .constants import ALLOWED_PRIORITIES, ALLOWED_LOCATIONS, STATUS_OPTIONS
+from .constants import ALLOWED_PRIORITIES, ALLOWED_LOCATIONS
 from .mutation_schemas import ApplicationChanges, MutationPayload, MutationTarget
 
 if TYPE_CHECKING:
@@ -164,7 +164,7 @@ def try_parse(transcript: str, context: dict) -> MutationPayload | None:
         return MutationPayload(
             operation=operation,
             target=target,
-            changes=ApplicationChanges(status="Applied"),
+            changes=ApplicationChanges(status="applied"),
         )
 
     # Mark rejected
@@ -176,7 +176,7 @@ def try_parse(transcript: str, context: dict) -> MutationPayload | None:
         return MutationPayload(
             operation=operation,
             target=target,
-            changes=ApplicationChanges(status="Rejected"),
+            changes=ApplicationChanges(status="rejected"),
         )
 
     # Archive application: "archive {company}", "remove {company}", "hide {company}"

@@ -23,13 +23,13 @@ class MutationTarget(BaseModel):
 
 class ApplicationChanges(BaseModel):
     company: Optional[str] = None
-    role: Optional[str] = None
+    roles: Optional[List[str]] = None
     status: Optional[str] = None
     priority: Optional[str] = None
     location_mode: Optional[str] = None
     job_link: Optional[str] = None
-    employment_type: Optional[str] = None
-    current_stage: Optional[str] = None
+    employment_types: Optional[List[str]] = None
+    current_stages: Optional[List[str]] = None
 
 
 class MutationPayload(BaseModel):

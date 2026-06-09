@@ -40,7 +40,7 @@ def make_payload(operation: str, changes: dict | None = None, target: dict | Non
 
 
 def test_create_draft_creates_db_row(db):
-    payload = make_payload("create_draft", changes={"company": "Neilsoft", "role": "AI Engineer"})
+    payload = make_payload("create_draft", changes={"company": "Neilsoft", "roles": ["AI Engineer"]})
     result = dispatch(payload, db)
 
     assert result.success is True
@@ -84,7 +84,7 @@ def test_patch_draft_updates_db_row(db):
 
 
 def test_save_draft_sets_is_draft_false(db):
-    create_payload = make_payload("create_draft", changes={"company": "Neilsoft", "role": "AI Engineer"})
+    create_payload = make_payload("create_draft", changes={"company": "Neilsoft", "roles": ["AI Engineer"]})
     create_result = dispatch(create_payload, db)
     assert create_result.success is True
     draft_id = str(create_result.draft["id"])
@@ -101,7 +101,7 @@ def test_save_draft_sets_is_draft_false(db):
 
 @pytest.mark.anyio
 async def test_save_draft_row_visible_in_applications_list(client, db):
-    create_payload = make_payload("create_draft", changes={"company": "DraftCo", "role": "Engineer"})
+    create_payload = make_payload("create_draft", changes={"company": "DraftCo", "roles": ["Engineer"]})
     create_result = dispatch(create_payload, db)
     draft_id = str(create_result.draft["id"])
 
@@ -182,3 +182,41 @@ async def test_draft_id_returned_in_transcript_response(client):
         assert row is not None
         assert row.is_draft is True
         assert row.company == "NewCo"
+
+
+# ---------------------------------------------------------------------------
+# Save-flow truthfulness via transcript fast-path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.anyio
+async def test_fast_path_save_returns_saved_state_not_preview_with_confirmation(client, db):
+    """Fast-path 'save' dispatches once, row becomes is_draft=False, response reflects saved state."""
+    # Create a draft row via dispatcher
+    create_payload = make_payload("create_draft", changes={"company": "SaveFlowCo", "roles": ["AI Engineer"]})
+    create_result = dispatch(create_payload, db)
+    assert create_result.success is True
+    draft_id = str(create_result.draft["id"])
+
+    # Send 'save it' through the transcript endpoint with draft_id in context
+    response = await client.post(
+        "/transcript/parse",
+        json={
+            "transcript": "save it",
+            "context": {"draft_id": draft_id},
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+
+    # Row should be saved (is_draft=False)
+    with SessionLocal() as check_db:
+        row = check_db.get(JobApplication, int(draft_id))
+        assert row.is_draft is False
+        assert row.draft_created_at is None
+
+    # Response must NOT still say it is an unsaved preview awaiting confirmation
+    assert body["needs_confirmation"] is False
+    assert body["draft_id"] is None  # draft_id cleared after save
+    # status remains "preview" (save is a create-type event)
+    assert body["status"] == "preview"
+    assert body["operation"] == "create"

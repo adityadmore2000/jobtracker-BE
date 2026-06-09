@@ -9,6 +9,7 @@ from .constants import (
     ALLOWED_LOCATIONS,
     ALLOWED_PRIORITIES,
     STATUS_OPTIONS,
+    normalize_status_value,
 )
 from .semantic_schemas import SemanticInterpreterMetrics, SemanticToolCallProposal
 
@@ -95,6 +96,18 @@ class JobApplicationBase(BaseModel):
     @classmethod
     def priority_is_allowed(cls, value: str | None) -> str:
         return validate_optional_allowed(normalize_string(value), ALLOWED_PRIORITIES, "priority")
+
+    @field_validator("status")
+    @classmethod
+    def status_is_allowed(cls, value: str | None) -> str:
+        normalized = normalize_string(value)
+        if not normalized:
+            return ""
+        canonical = normalize_status_value(normalized)
+        if canonical is None:
+            allowed_values = ", ".join(STATUS_OPTIONS)
+            raise ValueError(f"status must be empty or one of: {allowed_values}")
+        return canonical
 
     @field_validator("job_link")
     @classmethod
@@ -187,6 +200,20 @@ class JobApplicationUpdate(BaseModel):
         if value is None:
             return value
         return validate_optional_allowed(value, ALLOWED_PRIORITIES, "priority")
+
+    @field_validator("status")
+    @classmethod
+    def status_is_allowed(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        canonical = normalize_status_value(stripped)
+        if canonical is None:
+            allowed_values = ", ".join(STATUS_OPTIONS)
+            raise ValueError(f"status must be empty or one of: {allowed_values}")
+        return canonical
 
     @field_validator("job_link")
     @classmethod
