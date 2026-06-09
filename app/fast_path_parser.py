@@ -1,7 +1,11 @@
 import re
+from typing import TYPE_CHECKING
 
 from .constants import ALLOWED_PRIORITIES, ALLOWED_LOCATIONS, STATUS_OPTIONS
 from .mutation_schemas import ApplicationChanges, MutationPayload, MutationTarget
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 def _normalize(text: str) -> str:
@@ -16,6 +20,40 @@ def _resolve_patch_target(context: dict) -> tuple[str | None, MutationTarget | N
     if app_id is not None:
         return "patch_application", MutationTarget(application_id=int(app_id))
     return None, None
+
+
+def _resolve_application_id_by_company(company_name: str, context: dict) -> int | None:
+    """Resolve a single non-archived application_id from context by company name match."""
+    applications = context.get("applications")
+    if not isinstance(applications, list):
+        return None
+    normalized_target = _normalize(company_name)
+    matches = [
+        app for app in applications
+        if isinstance(app, dict)
+        and _normalize(app.get("company", "")) == normalized_target
+        and not app.get("archived_at")
+    ]
+    if len(matches) == 1:
+        return matches[0].get("id")
+    return None
+
+
+def _resolve_archived_application_id_by_company(company_name: str, context: dict) -> int | None:
+    """Resolve a single archived application_id from context by company name match."""
+    applications = context.get("applications")
+    if not isinstance(applications, list):
+        return None
+    normalized_target = _normalize(company_name)
+    matches = [
+        app for app in applications
+        if isinstance(app, dict)
+        and _normalize(app.get("company", "")) == normalized_target
+        and app.get("archived_at")
+    ]
+    if len(matches) == 1:
+        return matches[0].get("id")
+    return None
 
 
 def try_parse(transcript: str, context: dict) -> MutationPayload | None:
@@ -140,5 +178,35 @@ def try_parse(transcript: str, context: dict) -> MutationPayload | None:
             target=target,
             changes=ApplicationChanges(status="Rejected"),
         )
+
+    # Archive application: "archive {company}", "remove {company}", "hide {company}"
+    archive_prefixes = ["archive ", "remove ", "hide "]
+    for prefix in archive_prefixes:
+        if normalized.startswith(prefix):
+            company_name = normalized[len(prefix):].strip()
+            if company_name:
+                application_id = _resolve_application_id_by_company(company_name, context)
+                if application_id is None:
+                    return None
+                return MutationPayload(
+                    operation="archive_application",
+                    target=MutationTarget(application_id=application_id),
+                    changes=ApplicationChanges(),
+                )
+
+    # Restore application: "restore {company}", "unarchive {company}", "bring back {company}"
+    restore_prefixes = ["restore ", "unarchive ", "bring back "]
+    for prefix in restore_prefixes:
+        if normalized.startswith(prefix):
+            company_name = normalized[len(prefix):].strip()
+            if company_name:
+                application_id = _resolve_archived_application_id_by_company(company_name, context)
+                if application_id is None:
+                    return None
+                return MutationPayload(
+                    operation="restore_application",
+                    target=MutationTarget(application_id=application_id),
+                    changes=ApplicationChanges(),
+                )
 
     return None

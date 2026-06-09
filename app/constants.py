@@ -52,3 +52,12 @@ STATUS_OPTIONS = [
     "Offer",
     "Archived",
 ]
+
+EVENT_TYPES = {
+    "application_saved",
+    "field_changed",
+    "note_added",
+    "status_changed",
+    "application_archived",
+    "application_restored",
+}

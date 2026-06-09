@@ -28,7 +28,9 @@ from .constants import (
 from .database import get_db
 from .livekit_config import LiveKitConfigurationError, get_livekit_settings
 from .migrations import run_startup_migrations_if_enabled
-from .models import AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, CompanyAlias, JobApplication
+from .models import ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, CompanyAlias, JobApplication
+from .mutation_dispatcher import dispatch
+from .mutation_schemas import MutationPayload, MutationTarget, ApplicationChanges
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
     ApplicationCreateCandidateRequest,
@@ -206,9 +208,26 @@ async def semantic_interpreter_health(interpreter: OllamaSemanticInterpreter = D
     return interpreter.health_check()
 
 
+@app.get("/applications/archived", response_model=list[JobApplicationRead])
+async def list_archived_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
+    return (
+        db.query(JobApplication)
+        .filter(JobApplication.is_draft == False)  # noqa: E712
+        .filter(JobApplication.archived_at != None)  # noqa: E711
+        .order_by(JobApplication.archived_at.desc())
+        .all()
+    )
+
+
 @app.get("/applications", response_model=list[JobApplicationRead])
 async def list_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
-    return db.query(JobApplication).filter(JobApplication.is_draft == False).order_by(JobApplication.updated_at.desc()).all()  # noqa: E712
+    return (
+        db.query(JobApplication)
+        .filter(JobApplication.is_draft == False)  # noqa: E712
+        .filter(JobApplication.archived_at == None)  # noqa: E711
+        .order_by(JobApplication.updated_at.desc())
+        .all()
+    )
 
 
 @app.get("/asr/hotwords", response_model=AsrHotwordsResponse)
@@ -345,19 +364,95 @@ async def update_application(
     return application
 
 
-@app.delete("/applications/{application_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_application(application_id: int, db: Session = Depends(get_db)) -> Response:
+@app.delete("/applications/{application_id}")
+async def delete_application(application_id: int, db: Session = Depends(get_db)) -> dict:
     application = db.get(JobApplication, application_id)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    return {
+        "requires_confirmation": True,
+        "confirmation_kind": "archive",
+        "message": f"Archive {application.company} — {', '.join(application.roles_json) if application.roles_json else 'application'}?",
+        "application_id": application_id,
+    }
 
-    try:
-        db.delete(application)
-        db.commit()
-    except IntegrityError as exc:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Application could not be deleted because related records are still enforcing integrity constraints.",
-        ) from exc
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@app.post("/applications/{application_id}/archive")
+async def archive_application(application_id: int, db: Session = Depends(get_db)) -> dict:
+    application = db.get(JobApplication, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    payload = MutationPayload(
+        operation="archive_application",
+        target=MutationTarget(application_id=application_id),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(payload, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+    return {"success": True, "message": result.message, "application": result.application}
+
+
+@app.post("/applications/{application_id}/restore")
+async def restore_application(application_id: int, db: Session = Depends(get_db)) -> dict:
+    application = db.get(JobApplication, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    payload = MutationPayload(
+        operation="restore_application",
+        target=MutationTarget(application_id=application_id),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(payload, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+    return {"success": True, "message": result.message, "application": result.application}
+
+
+@app.get("/applications/{application_id}/notes")
+async def get_application_notes(application_id: int, db: Session = Depends(get_db)) -> dict:
+    application = db.get(JobApplication, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.is_draft:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot get notes for a draft application")
+    notes = (
+        db.query(ApplicationNote)
+        .filter(ApplicationNote.application_id == application_id)
+        .order_by(ApplicationNote.created_at.asc())
+        .all()
+    )
+    return {
+        "application_id": application_id,
+        "notes": [
+            {"id": n.id, "text": n.text, "created_at": n.created_at.isoformat()}
+            for n in notes
+        ],
+    }
+
+
+@app.get("/applications/{application_id}/timeline")
+async def get_application_timeline(application_id: int, db: Session = Depends(get_db)) -> dict:
+    application = db.get(JobApplication, application_id)
+    if application is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    if application.is_draft:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot get timeline for a draft application")
+    events = (
+        db.query(ApplicationEvent)
+        .filter(ApplicationEvent.application_id == application_id)
+        .order_by(ApplicationEvent.created_at.asc())
+        .all()
+    )
+    return {
+        "application_id": application_id,
+        "timeline": [
+            {
+                "id": e.id,
+                "event_type": e.event_type,
+                "payload": e.payload,
+                "created_at": e.created_at.isoformat(),
+            }
+            for e in events
+        ],
+    }

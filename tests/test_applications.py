@@ -6,7 +6,7 @@ from httpx import ASGITransport, AsyncClient
 from app.company_resolution import detect_explicit_known_companies
 from app.database import SessionLocal
 from app.main import app
-from app.models import AsrCompanyCorrectionEvent, CanonicalCompany, CompanyAlias
+from app.models import AsrCompanyCorrectionEvent, CanonicalCompany, CompanyAlias, JobApplication
 from app.semantic_validation import (
     CLARIFICATION_CONFLICTING_COMPANY,
     CLARIFICATION_MISSING_COMPANY,
@@ -2119,9 +2119,13 @@ async def test_update_status_accepts_custom_string(client):
 async def test_delete_application(client):
     created = await create_record(client)
     response = await client.delete(f"/applications/{created['id']}")
-    assert response.status_code == 204
-    missing = await client.get(f"/applications/{created['id']}")
-    assert missing.status_code == 404
+    assert response.status_code == 200
+    body = response.json()
+    assert body["requires_confirmation"] is True
+    assert body["confirmation_kind"] == "archive"
+    # Row is NOT deleted — use POST /archive to actually archive
+    still_there = await client.get(f"/applications/{created['id']}")
+    assert still_there.status_code == 200
 
 
 @pytest.mark.anyio
@@ -2148,7 +2152,18 @@ async def test_delete_application_preserves_asr_correction_history_and_nulls_app
     )
 
     delete_response = await client.delete(f"/applications/{created['id']}")
-    assert delete_response.status_code == 204
+    assert delete_response.status_code == 200
+    assert delete_response.json()["requires_confirmation"] is True
+
+    # Hard delete via archive + direct DB delete to test correction event behavior
+    archive_response = await client.post(f"/applications/{created['id']}/archive")
+    assert archive_response.status_code == 200
+
+    # Now actually hard-delete via DB to test ASR event behavior
+    with SessionLocal() as db:
+        app_obj = db.get(JobApplication, created["id"])
+        db.delete(app_obj)
+        db.commit()
 
     missing = await client.get(f"/applications/{created['id']}")
     assert missing.status_code == 404
@@ -2188,9 +2203,11 @@ async def test_delete_application_without_correction_events_still_works(client):
 
     response = await client.delete(f"/applications/{created['id']}")
 
-    assert response.status_code == 204
-    missing = await client.get(f"/applications/{created['id']}")
-    assert missing.status_code == 404
+    assert response.status_code == 200
+    assert response.json()["requires_confirmation"] is True
+    # Row not deleted — still accessible
+    still_there = await client.get(f"/applications/{created['id']}")
+    assert still_there.status_code == 200
 
 
 @pytest.mark.anyio
@@ -2723,8 +2740,9 @@ async def test_hotword_list_retains_canonical_company_after_last_application_is_
         },
     )
 
-    deleted = await client.delete(f"/applications/{created['id']}")
-    assert deleted.status_code == 204
+    # Archive the application (soft delete) — canonical company still exists
+    archived = await client.post(f"/applications/{created['id']}/archive")
+    assert archived.status_code == 200
 
     hotwords = await client.get("/asr/hotwords")
     assert hotwords.status_code == 200

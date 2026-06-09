@@ -1,4 +1,6 @@
+import logging
 from datetime import datetime, timezone
+from typing import List
 
 from sqlalchemy.orm import Session
 
@@ -9,7 +11,7 @@ from .constants import (
     ALLOWED_PRIORITIES,
     STATUS_OPTIONS,
 )
-from .models import JobApplication
+from .models import ApplicationEvent, ApplicationNote, JobApplication
 from .mutation_schemas import (
     ALLOWED_OPERATIONS,
     ApplicationChanges,
@@ -17,6 +19,8 @@ from .mutation_schemas import (
     MutationResult,
     MutationTarget,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _error(operation: str, message: str) -> MutationResult:
@@ -58,6 +62,14 @@ def _application_to_dict(app: JobApplication) -> dict:
     }
 
 
+def _note_to_dict(note: ApplicationNote) -> dict:
+    return {
+        "id": note.id,
+        "text": note.text,
+        "created_at": note.created_at.isoformat() if note.created_at else None,
+    }
+
+
 def _apply_changes_to_application(app: JobApplication, changes: ApplicationChanges) -> None:
     if changes.company is not None:
         app.company = changes.company
@@ -75,6 +87,32 @@ def _apply_changes_to_application(app: JobApplication, changes: ApplicationChang
         app.employment_types_json = [changes.employment_type]
     if changes.current_stage is not None:
         app.current_stages_json = [changes.current_stage]
+
+
+def _append_notes(application_id: int, notes: List[str], db: Session) -> List[ApplicationNote]:
+    """Insert one ApplicationNote row per note string. Must be called inside the parent transaction."""
+    created = []
+    for text in notes:
+        note = ApplicationNote(
+            application_id=application_id,
+            text=text,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(note)
+        created.append(note)
+    return created
+
+
+def _append_event(application_id: int, event_type: str, payload: dict, db: Session) -> ApplicationEvent:
+    """Insert one ApplicationEvent row. Must be called inside the parent transaction."""
+    event = ApplicationEvent(
+        application_id=application_id,
+        event_type=event_type,
+        payload=payload,
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(event)
+    return event
 
 
 def handle_create_draft(payload: MutationPayload, db: Session) -> MutationResult:
@@ -116,6 +154,9 @@ def handle_patch_draft(payload: MutationPayload, db: Session) -> MutationResult:
     if enum_error:
         return enum_error
 
+    if payload.notes_to_append:
+        logger.warning("patch_draft received notes_to_append — ignoring; notes cannot be attached to drafts")
+
     if payload.target.draft_id is not None:
         try:
             draft_id = int(payload.target.draft_id)
@@ -156,13 +197,20 @@ def handle_save_draft(payload: MutationPayload, db: Session) -> MutationResult:
             return _error("save_draft", "Draft must have company to be saved.")
         app.is_draft = False
         app.draft_created_at = None
+        _append_event(app.id, "application_saved", {}, db)
+        if payload.notes_to_append:
+            created_notes = _append_notes(app.id, payload.notes_to_append, db)
+            for note in created_notes:
+                _append_event(app.id, "note_added", {"text": note.text}, db)
         db.commit()
         db.refresh(app)
+        notes_list = [_note_to_dict(n) for n in app.notes] if payload.notes_to_append else None
         return MutationResult(
             success=True,
             operation="save_draft",
             message="Draft saved as application.",
             application=_application_to_dict(app),
+            notes=notes_list,
         )
 
     if not payload.changes.company:
@@ -212,14 +260,50 @@ def handle_patch_application(payload: MutationPayload, db: Session) -> MutationR
     if app.is_draft:
         return _error("patch_application", "Cannot patch a draft application via patch_application. Use patch_draft.")
 
+    # Capture old values before applying changes
+    old_status = app.status
+    old_priority = app.priority
+    old_location = app.location
+    old_job_link = app.job_link
+    old_company = app.company
+    old_roles = list(app.roles_json)
+    old_employment_types = list(app.employment_types_json)
+    old_current_stages = list(app.current_stages_json)
+
     _apply_changes_to_application(app, payload.changes)
+
+    # Emit events for fields that actually changed
+    if payload.changes.status is not None and app.status != old_status:
+        _append_event(app.id, "status_changed", {"field": "status", "from": old_status, "to": app.status}, db)
+    if payload.changes.priority is not None and app.priority != old_priority:
+        _append_event(app.id, "field_changed", {"field": "priority", "from": old_priority, "to": app.priority}, db)
+    if payload.changes.location_mode is not None and app.location != old_location:
+        _append_event(app.id, "field_changed", {"field": "location", "from": old_location, "to": app.location}, db)
+    if payload.changes.job_link is not None and app.job_link != old_job_link:
+        _append_event(app.id, "field_changed", {"field": "job_link", "from": old_job_link, "to": app.job_link}, db)
+    if payload.changes.company is not None and app.company != old_company:
+        _append_event(app.id, "field_changed", {"field": "company", "from": old_company, "to": app.company}, db)
+    if payload.changes.role is not None and app.roles_json != old_roles:
+        _append_event(app.id, "field_changed", {"field": "role", "from": old_roles, "to": app.roles_json}, db)
+    if payload.changes.employment_type is not None and app.employment_types_json != old_employment_types:
+        _append_event(app.id, "field_changed", {"field": "employment_type", "from": old_employment_types, "to": app.employment_types_json}, db)
+    if payload.changes.current_stage is not None and app.current_stages_json != old_current_stages:
+        _append_event(app.id, "field_changed", {"field": "current_stage", "from": old_current_stages, "to": app.current_stages_json}, db)
+
+    if payload.notes_to_append:
+        created_notes = _append_notes(app.id, payload.notes_to_append, db)
+        for note in created_notes:
+            _append_event(app.id, "note_added", {"text": note.text}, db)
+
     db.commit()
     db.refresh(app)
+    notes_list = [_note_to_dict(n) for n in app.notes] if payload.notes_to_append else None
     return MutationResult(
         success=True,
         operation="patch_application",
         message="Application patched.",
         application=_application_to_dict(app),
+        notes=notes_list,
     )
 
 
@@ -230,6 +314,79 @@ def handle_ask_clarification(payload: MutationPayload, db: Session) -> MutationR
         operation="ask_clarification",
         message="Clarification required.",
         clarification_question=question,
+    )
+
+
+def handle_append_note(payload: MutationPayload, db: Session) -> MutationResult:
+    if not payload.notes_to_append:
+        return _error("append_note", "notes_to_append must not be empty")
+    if payload.target.application_id is None:
+        return _error("append_note", "application_id is required in target for append_note")
+
+    app = db.get(JobApplication, payload.target.application_id)
+    if app is None:
+        return _error("append_note", f"Application {payload.target.application_id} not found")
+    if app.is_draft:
+        return _error("append_note", "Cannot append notes to a draft application")
+
+    created_notes = _append_notes(app.id, payload.notes_to_append, db)
+    for note in created_notes:
+        _append_event(app.id, "note_added", {"text": note.text}, db)
+    db.commit()
+    for note in created_notes:
+        db.refresh(note)
+
+    return MutationResult(
+        success=True,
+        operation="append_note",
+        message="Notes appended.",
+        notes=[_note_to_dict(n) for n in created_notes],
+    )
+
+
+def handle_archive_application(payload: MutationPayload, db: Session) -> MutationResult:
+    if payload.target.application_id is None:
+        return _error("archive_application", "application_id is required in target for archive_application")
+
+    app = db.get(JobApplication, payload.target.application_id)
+    if app is None:
+        return _error("archive_application", f"Application {payload.target.application_id} not found")
+    if app.is_draft:
+        return _error("archive_application", "Cannot archive a draft application")
+    if app.archived_at is not None:
+        return _error("archive_application", "Application is already archived")
+
+    app.archived_at = datetime.now(timezone.utc)
+    _append_event(app.id, "application_archived", {}, db)
+    db.commit()
+    db.refresh(app)
+    return MutationResult(
+        success=True,
+        operation="archive_application",
+        message="Application archived.",
+        application=_application_to_dict(app),
+    )
+
+
+def handle_restore_application(payload: MutationPayload, db: Session) -> MutationResult:
+    if payload.target.application_id is None:
+        return _error("restore_application", "application_id is required in target for restore_application")
+
+    app = db.get(JobApplication, payload.target.application_id)
+    if app is None:
+        return _error("restore_application", f"Application {payload.target.application_id} not found")
+    if app.archived_at is None:
+        return _error("restore_application", "Application is not archived")
+
+    app.archived_at = None
+    _append_event(app.id, "application_restored", {}, db)
+    db.commit()
+    db.refresh(app)
+    return MutationResult(
+        success=True,
+        operation="restore_application",
+        message="Application restored.",
+        application=_application_to_dict(app),
     )
 
 
@@ -248,5 +405,8 @@ def dispatch(payload: MutationPayload, db: Session) -> MutationResult:
         "discard_draft": handle_discard_draft,
         "patch_application": handle_patch_application,
         "ask_clarification": handle_ask_clarification,
+        "append_note": handle_append_note,
+        "archive_application": handle_archive_application,
+        "restore_application": handle_restore_application,
     }
     return handlers[payload.operation](payload, db)

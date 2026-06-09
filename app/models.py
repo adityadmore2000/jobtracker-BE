@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -27,12 +27,23 @@ class JobApplication(Base):
     comments: Mapped[str] = mapped_column(String, nullable=False, default="")
     is_draft: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     draft_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
     correction_events: Mapped[list["AsrCompanyCorrectionEvent"]] = relationship(
         back_populates="application",
         passive_deletes=True,
+    )
+    notes: Mapped[list["ApplicationNote"]] = relationship(
+        "ApplicationNote",
+        order_by="ApplicationNote.created_at",
+        cascade="all, delete-orphan",
+    )
+    events: Mapped[list["ApplicationEvent"]] = relationship(
+        "ApplicationEvent",
+        order_by="ApplicationEvent.created_at",
+        cascade="all, delete-orphan",
     )
 
 
@@ -90,3 +101,30 @@ class BrowserContext(Base):
     url: Mapped[str] = mapped_column(String, nullable=False)
     page_title: Mapped[str] = mapped_column(String, nullable=False, default="")
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+
+class ApplicationNote(Base):
+    __tablename__ = "application_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    application_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("job_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class ApplicationEvent(Base):
+    __tablename__ = "application_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    application_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("job_applications.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )

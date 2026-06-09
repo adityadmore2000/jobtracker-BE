@@ -10,6 +10,9 @@ ALLOWED_OPERATIONS = {
     "discard_draft",
     "patch_application",
     "ask_clarification",
+    "append_note",
+    "archive_application",
+    "restore_application",
 }
 
 
@@ -45,3 +48,4 @@ class MutationResult(BaseModel):
     requires_confirmation: bool = False
     confirmation_kind: Optional[str] = None
     clarification_question: Optional[str] = None
+    notes: Optional[List[dict]] = None
