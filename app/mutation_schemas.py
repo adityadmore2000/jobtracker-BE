@@ -14,12 +14,17 @@ ALLOWED_OPERATIONS = {
     "archive_application",
     "restore_application",
     "delete_application_permanently",
+    "create_application_update_draft",
+    "patch_application_update_draft",
+    "apply_application_update_draft",
+    "discard_application_update_draft",
 }
 
 
 class MutationTarget(BaseModel):
     draft_id: Optional[str] = None
     application_id: Optional[int] = None
+    change_draft_id: Optional[int] = None
 
 
 class ApplicationChanges(BaseModel):
@@ -31,6 +36,9 @@ class ApplicationChanges(BaseModel):
     job_link: Optional[str] = None
     employment_types: Optional[List[str]] = None
     current_stages: Optional[List[str]] = None
+    next_action: Optional[str] = None
+    comments: Optional[str] = None
+    engaged_days: Optional[int] = None
 
 
 class MutationPayload(BaseModel):
@@ -47,6 +55,7 @@ class MutationResult(BaseModel):
     conflict: bool = False
     draft: Optional[dict] = None
     application: Optional[dict] = None
+    change_draft: Optional[dict] = None
     requires_confirmation: bool = False
     confirmation_kind: Optional[str] = None
     clarification_question: Optional[str] = None

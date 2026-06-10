@@ -67,6 +67,11 @@ class JobApplication(Base):
         order_by="ApplicationEvent.created_at",
         cascade="all, delete-orphan",
     )
+    change_drafts: Mapped[list["ApplicationChangeDraft"]] = relationship(
+        "ApplicationChangeDraft",
+        back_populates="target_application",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def company(self) -> str:
@@ -153,4 +158,38 @@ class ApplicationEvent(Base):
     payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class ApplicationChangeDraft(Base):
+    """Staged update preview for an existing saved application.
+
+    kind is always 'update' for MVP. changes_json stores only the delta fields.
+    """
+    __tablename__ = "application_change_drafts"
+    __table_args__ = (
+        UniqueConstraint("target_application_id", name="uq_application_change_drafts_target"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, default="update")
+    target_application_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("job_applications.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    changes_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    target_application: Mapped["JobApplication"] = relationship(
+        "JobApplication",
+        back_populates="change_drafts",
     )

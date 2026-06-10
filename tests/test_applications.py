@@ -480,7 +480,7 @@ async def test_parse_transcript_patch_active_draft_returns_preview_data(client):
 
     parsed = await parse_transcript(client, "Add AI Engineer role for Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -497,7 +497,7 @@ async def test_parse_transcript_partial_draft_accepts_company_only_phrase(client
 
     parsed = await parse_transcript(client, "I have a requirement. I want to add an application neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == ""
     assert parsed["clarification_question"] is None
@@ -514,7 +514,7 @@ async def test_parse_transcript_partial_draft_accepts_add_neilsoft_application(c
 
     parsed = await parse_transcript(client, "Add a Neilsoft application", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
 
 
@@ -529,7 +529,7 @@ async def test_parse_transcript_partial_draft_accepts_hinglish_company_only(clie
 
     parsed = await parse_transcript(client, "Neilsoft sathi application add kar", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
 
 
@@ -571,7 +571,7 @@ async def test_parse_transcript_known_company_reconciles_missing_company_for_pat
 
     parsed = await parse_transcript(client, "AI Engineer role for Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert interpreter.calls[0]["context"]["explicit_known_companies"] == ["Neilsoft"]
@@ -594,7 +594,7 @@ async def test_parse_transcript_conversational_extraction_safely_merges_missing_
         interpreter,
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert interpreter.calls[0]["context"]["explicit_known_companies"] == ["Neilsoft"]
@@ -613,7 +613,7 @@ async def test_parse_transcript_role_alias_shape_is_repaired_for_varied_word_ord
 
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -630,7 +630,7 @@ async def test_parse_transcript_scalar_roles_shape_is_repaired(client):
 
     parsed = await parse_transcript(client, "At Neilsoft, role is AI Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -648,7 +648,7 @@ async def test_parse_transcript_role_at_neilsoft_for_ai_engineer(client):
 
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -666,7 +666,7 @@ async def test_parse_transcript_ai_engineer_role_for_neilsoft(client):
 
     parsed = await parse_transcript(client, "AI Engineer role for Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -684,7 +684,7 @@ async def test_parse_transcript_at_neilsoft_role_is_ai_engineer(client):
 
     parsed = await parse_transcript(client, "At Neilsoft, role is AI Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -702,7 +702,7 @@ async def test_parse_transcript_track_ai_engineer_opening_at_neilsoft(client):
 
     parsed = await parse_transcript(client, "Track an AI Engineer opening at Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -720,7 +720,7 @@ async def test_parse_transcript_applied_ai_engineer_role_for_neilsoft(client):
 
     parsed = await parse_transcript(client, "Applied AI Engineer role for Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "Applied AI Engineer"
 
@@ -738,7 +738,7 @@ async def test_parse_transcript_ai_engineer_intern_role_for_neilsoft(client):
 
     parsed = await parse_transcript(client, "AI Engineer Intern role for Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer Intern"
 
@@ -772,7 +772,7 @@ async def test_parse_transcript_representative_patch_normalizes_multiple_fields(
 
     parsed = await parse_transcript(client, "Neilsoft sathi AI Engineer role, fulltime onsite, high priority", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -811,7 +811,7 @@ async def test_parse_transcript_reported_false_conflict_sentence_uses_authoritat
         interpreter,
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -831,7 +831,7 @@ async def test_parse_transcript_multi_word_company_role_variant(client):
 
     parsed = await parse_transcript(client, "Role at Rockwell Automation for ML Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Rockwell Automation"
     assert parsed["draft"]["role"] == "ML Engineer"
 
@@ -853,7 +853,7 @@ async def test_parse_transcript_filler_is_ignored_during_extraction_merge(client
         interpreter,
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -875,7 +875,7 @@ async def test_parse_transcript_remote_internship_aliases_normalize_for_draft(cl
 
     parsed = await parse_transcript(client, "Neilsoft application is remote internship", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["employment_types"] == ["Internship"]
     assert parsed["draft"]["location"] == "remote"
@@ -903,7 +903,7 @@ async def test_parse_transcript_remote_fulltime_role_extraction_is_preserved(cli
         interpreter,
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -937,7 +937,7 @@ async def test_parse_transcript_equivalent_selected_values_do_not_conflict(clien
 
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
@@ -962,7 +962,7 @@ async def test_parse_transcript_legacy_roles_array_dropped_when_role_scalar_pres
 
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["role"] == "AI Engineer"
 
 
@@ -1092,7 +1092,7 @@ async def test_parse_transcript_known_company_retry_recovers_missing_company_cla
 
     parsed = await parse_transcript(client, "AI Engineer role for Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert len(interpreter.calls) == 2
@@ -1125,7 +1125,7 @@ async def test_parse_transcript_schema_repair_retry_recovers_invalid_first_shape
 
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert len(interpreter.calls) == 2
@@ -1168,7 +1168,7 @@ async def test_parse_transcript_patch_active_draft_uses_active_context_when_need
         },
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "RAG Engineer"
     assert parsed["draft"]["priority"] == "HIGH"
@@ -1208,7 +1208,7 @@ async def test_parse_transcript_patch_active_draft_preserves_company_for_role_fo
         },
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -1247,7 +1247,7 @@ async def test_parse_transcript_patch_active_draft_preserves_company_for_type_an
         },
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -1284,7 +1284,7 @@ async def test_parse_transcript_patch_active_draft_normalizes_current_stage_alia
         },
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -1321,7 +1321,7 @@ async def test_parse_transcript_patch_active_draft_preserves_prior_fields_for_st
         },
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -1379,7 +1379,7 @@ async def test_parse_transcript_known_company_reconciles_missing_company_for_per
 
     parsed = await parse_transcript(client, "Update Neilsoft priority to high", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["application_id"] == created["id"]
     assert parsed["draft"]["priority"] == "HIGH"
 
@@ -1400,7 +1400,7 @@ async def test_parse_transcript_preview_existing_application_update_for_status_c
 
     parsed = await parse_transcript(client, "Mark Neilsoft as rejected", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["application_id"] == created["id"]
     assert parsed["draft"]["status"] == "rejected"
 
@@ -1527,7 +1527,7 @@ async def test_parse_transcript_unknown_new_company_still_supported_via_extracti
 
     parsed = await parse_transcript(client, "Track an AI Engineer application at NewStartup Labs", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "NewStartup Labs"
     assert parsed["draft"]["role"] == "AI Engineer"
 
@@ -1549,7 +1549,7 @@ async def test_parse_transcript_preview_existing_application_update_resolves_sin
 
     parsed = await parse_transcript(client, "Set Rockwell Automation AI Engineer priority to high", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["application_id"] == created["id"]
     assert parsed["draft"]["priority"] == "HIGH"
 
@@ -1635,7 +1635,7 @@ async def test_parse_transcript_preview_existing_application_update_normalizes_s
 
     parsed = await parse_transcript(client, "For Neilsoft set status applied", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["application_id"] == created["id"]
     assert parsed["draft"]["status"] == "applied"
 
@@ -1656,7 +1656,7 @@ async def test_parse_transcript_preview_existing_application_update_normalizes_p
 
     parsed = await parse_transcript(client, "Set Neilsoft priority high", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["application_id"] == created["id"]
     assert parsed["draft"]["priority"] == "HIGH"
 
@@ -1699,7 +1699,7 @@ async def test_parse_transcript_preview_existing_application_update_preserves_tr
 
     parsed = await parse_transcript(client, "Add note for Neilsoft saying referral received", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["application_id"] == created["id"]
     assert parsed["draft"]["comments"] == "referral received"
 
@@ -1721,7 +1721,7 @@ async def test_parse_transcript_invented_pass2_patch_field_is_discarded_when_not
 
     parsed = await parse_transcript(client, "Track an AI Engineer application at Neilsoft", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["priority"] == ""
@@ -1748,7 +1748,7 @@ async def test_parse_transcript_patch_active_draft_warns_when_full_time_is_not_u
 
     parsed = await parse_transcript(client, "yeah for neilsoft, i'm applying for AI Engineer role for full time role", interpreter)
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
     assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
@@ -2033,7 +2033,7 @@ async def test_parse_transcript_preview_existing_application_update_accepts_expl
         context={"active_application": {"application_id": created["id"]}},
     )
 
-    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated", "pending_changes_created", "pending_changes_updated"}
     assert parsed["application_id"] == created["id"]
     assert parsed["draft"]["priority"] == "HIGH"
 

@@ -132,7 +132,7 @@ async def test_list_applications_multi_value_fields_preserved(client, db):
 # ---------------------------------------------------------------------------
 
 INTERNAL_LEAKAGE_FIELDS = {"proposal", "raw_transcript", "interpreter_metrics", "operation", "needs_confirmation", "confirmation_kind", "drafts"}
-REQUIRED_TRANSCRIPT_FIELDS = {"status", "message", "application_id", "draft_id", "draft", "warnings", "clarification_question"}
+REQUIRED_TRANSCRIPT_FIELDS = {"status", "message", "application_id", "draft_id", "draft", "warnings", "clarification_question", "pending_changes"}
 
 
 def _assert_no_internal_leakage(body: dict) -> None:
@@ -406,7 +406,8 @@ async def test_patch_application_via_transcript_returns_updated(client, db):
     assert response.status_code == 200
     body = response.json()
     _assert_transcript_shape(body)
-    assert body["status"] == "updated"
+    # Chat updates to saved applications now create pending-change previews instead of direct patches
+    assert body["status"] in {"updated", "pending_changes_created", "pending_changes_updated"}
 
 
 # ---------------------------------------------------------------------------

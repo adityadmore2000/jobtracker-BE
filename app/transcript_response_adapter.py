@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from .models import JobApplication
-from .public_schemas import PublicApplicationDTO, PublicTranscriptResponse
+from .public_schemas import PublicApplicationChangeDraftDTO, PublicApplicationDTO, PublicTranscriptResponse
 from .schemas import JobApplicationBase, SemanticTranscriptResponse
 
 
@@ -91,6 +93,57 @@ def _app_base_to_public_draft(base: JobApplicationBase, draft_id: str | None, dr
     )
 
 
+def to_public_change_draft(cd_dict: dict) -> PublicApplicationChangeDraftDTO | None:
+    """Convert a change_draft dict (from _change_draft_to_dict) to the public DTO."""
+    if not cd_dict:
+        return None
+    original_raw = cd_dict.get("original")
+    preview_raw = cd_dict.get("preview")
+    if not original_raw or not preview_raw:
+        return None
+
+    def _dict_to_app_dto(d: dict) -> PublicApplicationDTO:
+        created_raw = d.get("created_at")
+        updated_raw = d.get("updated_at")
+        created_dt = datetime.fromisoformat(created_raw) if isinstance(created_raw, str) else created_raw
+        updated_dt = datetime.fromisoformat(updated_raw) if isinstance(updated_raw, str) else updated_raw
+        return PublicApplicationDTO(
+            id=d.get("id", 0),
+            company=d.get("company", ""),
+            role=d.get("role", ""),
+            employment_types=d.get("employment_types_json") or [],
+            job_link=d.get("job_link", ""),
+            location=d.get("location", ""),
+            status=d.get("status", ""),
+            current_stages=d.get("current_stages_json") or [],
+            priority=d.get("priority", ""),
+            engaged_days=d.get("engaged_days", 0),
+            next_action=d.get("next_action", ""),
+            comments=d.get("comments", ""),
+            is_draft=d.get("is_draft", False),
+            draft_created_at=d.get("draft_created_at"),
+            archived_at=d.get("archived_at"),
+            created_at=created_dt,
+            updated_at=updated_dt,
+        )
+
+    created_at_raw = cd_dict.get("created_at")
+    updated_at_raw = cd_dict.get("updated_at")
+    created_at = datetime.fromisoformat(created_at_raw) if isinstance(created_at_raw, str) else created_at_raw
+    updated_at = datetime.fromisoformat(updated_at_raw) if isinstance(updated_at_raw, str) else updated_at_raw
+
+    return PublicApplicationChangeDraftDTO(
+        id=cd_dict["id"],
+        kind=cd_dict.get("kind", "update"),
+        target_application_id=cd_dict["target_application_id"],
+        original=_dict_to_app_dto(original_raw),
+        preview=_dict_to_app_dto(preview_raw),
+        changed_fields=cd_dict.get("changed_fields", []),
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
 # Internal status → public status mapping
 _INTERNAL_TO_PUBLIC: dict[str, str] = {
     "preview": "__resolve_by_operation__",
@@ -109,6 +162,10 @@ _OPERATION_TO_PUBLIC_STATUS: dict[str, str] = {
     "append_note": "updated",
     "archive_application": "updated",
     "restore_application": "updated",
+    "create_application_update_draft": "pending_changes_created",
+    "patch_application_update_draft": "pending_changes_updated",
+    "apply_application_update_draft": "changes_applied",
+    "discard_application_update_draft": "changes_discarded",
 }
 
 _DEFAULT_MESSAGES: dict[str, str] = {
@@ -120,6 +177,10 @@ _DEFAULT_MESSAGES: dict[str, str] = {
     "clarification": "Please clarify.",
     "no_change": "No change was made.",
     "error": "An error occurred.",
+    "pending_changes_created": "Pending changes created. Review and apply when ready.",
+    "pending_changes_updated": "Pending changes updated.",
+    "changes_applied": "Changes applied.",
+    "changes_discarded": "Pending changes discarded.",
 }
 
 
@@ -145,6 +206,13 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
                 public_status = "draft_created"
         elif operation == "update":
             public_status = "updated"
+        elif operation == "pending_changes":
+            # Distinguish create vs patch from internal operation
+            internal_op = internal.operation if hasattr(internal, "operation") else ""
+            if internal_op == "patch_application_update_draft":
+                public_status = "pending_changes_updated"
+            else:
+                public_status = "pending_changes_created"
         else:
             public_status = "no_change"
     elif internal_status == "clarification_required":
@@ -187,6 +255,10 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
             updated_at=None,  # type: ignore[arg-type]
         )
 
+    public_change_draft: PublicApplicationChangeDraftDTO | None = None
+    if internal.change_draft is not None:
+        public_change_draft = to_public_change_draft(internal.change_draft)
+
     return PublicTranscriptResponse(
         status=public_status,  # type: ignore[arg-type]
         message=message,
@@ -194,6 +266,7 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
         draft_id=internal.draft_id,
         draft=public_draft,
         application=None,
+        pending_changes=public_change_draft,
         warnings=list(internal.warnings),
         clarification_question=internal.clarification_question if public_status == "clarification" else None,
     )

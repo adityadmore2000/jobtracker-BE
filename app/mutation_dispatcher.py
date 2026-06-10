@@ -13,7 +13,7 @@ from .constants import (
     STATUS_OPTIONS,
     normalize_status_value,
 )
-from .models import ApplicationEvent, ApplicationNote, JobApplication
+from .models import ApplicationChangeDraft, ApplicationEvent, ApplicationNote, JobApplication
 from .role_resolution import find_application_by_company_role, normalize_role_name
 from .mutation_schemas import (
     ALLOWED_OPERATIONS,
@@ -36,6 +36,10 @@ _OPERATION_TO_TRANSCRIPT_OP: dict[str, str] = {
     "archive_application": "none",
     "restore_application": "none",
     "delete_application_permanently": "none",
+    "create_application_update_draft": "pending_changes",
+    "patch_application_update_draft": "pending_changes",
+    "apply_application_update_draft": "update",
+    "discard_application_update_draft": "none",
 }
 
 assert set(_OPERATION_TO_TRANSCRIPT_OP.keys()) == ALLOWED_OPERATIONS, (
@@ -120,6 +124,12 @@ def _apply_changes_to_application(app: JobApplication, changes: ApplicationChang
         app.employment_types_json = list(changes.employment_types)
     if changes.current_stages is not None:
         app.current_stages_json = list(changes.current_stages)
+    if changes.next_action is not None:
+        app.next_action = changes.next_action
+    if changes.comments is not None:
+        app.comments = changes.comments
+    if changes.engaged_days is not None:
+        app.engaged_days = changes.engaged_days
 
 
 def _append_notes(application_id: int, notes: List[str], db: Session) -> List[ApplicationNote]:
@@ -611,6 +621,314 @@ def _changes_to_dict(changes: ApplicationChanges) -> dict:
     return {k: v for k, v in changes.model_dump().items() if v is not None}
 
 
+# ---------------------------------------------------------------------------
+# Pending-changes helpers
+# ---------------------------------------------------------------------------
+
+_CHANGE_DRAFT_FIELD_MAP = {
+    "company": "company",
+    "role": "role",
+    "status": "status",
+    "priority": "priority",
+    "location_mode": "location",
+    "job_link": "job_link",
+    "employment_types": "employment_types",
+    "current_stages": "current_stages",
+    "next_action": "next_action",
+    "comments": "comments",
+    "engaged_days": "engaged_days",
+}
+
+
+def _changes_to_changes_json(changes: ApplicationChanges) -> dict:
+    """Convert ApplicationChanges to the storage dict (only non-None fields)."""
+    result = {}
+    raw = changes.model_dump()
+    for schema_key, json_key in _CHANGE_DRAFT_FIELD_MAP.items():
+        val = raw.get(schema_key)
+        if val is not None:
+            result[json_key] = val
+    return result
+
+
+def _merge_changes_json(existing: dict, incoming: dict) -> dict:
+    """Merge new changes onto existing ones (last-write wins per field)."""
+    merged = dict(existing)
+    merged.update(incoming)
+    return merged
+
+
+def _build_preview_application(original: JobApplication, changes_json: dict) -> dict:
+    """Build a preview dict representing what the application would look like after applying changes."""
+    preview = _application_to_dict(original)
+    for json_key, value in changes_json.items():
+        if json_key == "location":
+            preview["location"] = value
+        elif json_key == "employment_types":
+            preview["employment_types_json"] = list(value) if isinstance(value, list) else value
+        elif json_key == "current_stages":
+            preview["current_stages_json"] = list(value) if isinstance(value, list) else value
+        elif json_key in {"next_action", "comments", "engaged_days", "company", "role", "status", "priority", "job_link"}:
+            preview[json_key] = value
+        else:
+            preview[json_key] = value
+    return preview
+
+
+_JSON_KEY_TO_APP_DICT_KEY = {
+    "employment_types": "employment_types_json",
+    "current_stages": "current_stages_json",
+    "location": "location",
+}
+
+
+def _compute_changed_fields(original: JobApplication, changes_json: dict) -> list[str]:
+    orig = _application_to_dict(original)
+    changed = []
+    for json_key in changes_json:
+        orig_key = _JSON_KEY_TO_APP_DICT_KEY.get(json_key, json_key)
+        orig_val = orig.get(orig_key)
+        new_val = changes_json[json_key]
+        if isinstance(orig_val, list) and isinstance(new_val, list):
+            if orig_val != new_val:
+                changed.append(json_key)
+        elif orig_val != new_val:
+            changed.append(json_key)
+    return changed
+
+
+def _change_draft_to_dict(cd: ApplicationChangeDraft, original: JobApplication) -> dict:
+    preview = _build_preview_application(original, cd.changes_json)
+    changed_fields = _compute_changed_fields(original, cd.changes_json)
+    return {
+        "id": cd.id,
+        "kind": cd.kind,
+        "target_application_id": cd.target_application_id,
+        "original": _application_to_dict(original),
+        "preview": preview,
+        "changed_fields": changed_fields,
+        "changes_json": cd.changes_json,
+        "created_at": cd.created_at.isoformat() if cd.created_at else None,
+        "updated_at": cd.updated_at.isoformat() if cd.updated_at else None,
+    }
+
+
+def handle_create_application_update_draft(payload: MutationPayload, db: Session) -> MutationResult:
+    if payload.target.application_id is None:
+        return _error("create_application_update_draft", "application_id is required")
+
+    enum_error = _validate_enum_fields(payload.changes, "create_application_update_draft")
+    if enum_error:
+        return enum_error
+
+    app = db.get(JobApplication, payload.target.application_id)
+    if app is None:
+        return _error("create_application_update_draft", f"Application {payload.target.application_id} not found")
+    if app.is_draft:
+        return _error("create_application_update_draft", "Cannot create pending changes for a draft application")
+    if app.archived_at is not None:
+        return _error("create_application_update_draft", "Cannot create pending changes for an archived application")
+
+    new_changes = _changes_to_changes_json(payload.changes)
+    if not new_changes:
+        return _error("create_application_update_draft", "No changes provided")
+
+    existing_cd = (
+        db.query(ApplicationChangeDraft)
+        .filter(ApplicationChangeDraft.target_application_id == app.id)
+        .first()
+    )
+    if existing_cd is not None:
+        # Merge new changes into existing draft
+        existing_cd.changes_json = _merge_changes_json(existing_cd.changes_json, new_changes)
+        from datetime import datetime, timezone
+        existing_cd.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(existing_cd)
+        cd_dict = _change_draft_to_dict(existing_cd, app)
+        return MutationResult(
+            success=True,
+            operation="patch_application_update_draft",
+            message="Pending changes updated.",
+            change_draft=cd_dict,
+            application=_application_to_dict(app),
+        )
+
+    cd = ApplicationChangeDraft(
+        kind="update",
+        target_application_id=app.id,
+        changes_json=new_changes,
+    )
+    db.add(cd)
+    db.commit()
+    db.refresh(cd)
+    cd_dict = _change_draft_to_dict(cd, app)
+    return MutationResult(
+        success=True,
+        operation="create_application_update_draft",
+        message="Pending changes created. Review and apply when ready.",
+        change_draft=cd_dict,
+        application=_application_to_dict(app),
+    )
+
+
+def handle_patch_application_update_draft(payload: MutationPayload, db: Session) -> MutationResult:
+    if payload.target.change_draft_id is None:
+        return _error("patch_application_update_draft", "change_draft_id is required")
+
+    enum_error = _validate_enum_fields(payload.changes, "patch_application_update_draft")
+    if enum_error:
+        return enum_error
+
+    cd = db.get(ApplicationChangeDraft, payload.target.change_draft_id)
+    if cd is None:
+        return _error("patch_application_update_draft", f"Change draft {payload.target.change_draft_id} not found")
+
+    app = db.get(JobApplication, cd.target_application_id)
+    if app is None:
+        return _error("patch_application_update_draft", "Target application not found")
+
+    new_changes = _changes_to_changes_json(payload.changes)
+    cd.changes_json = _merge_changes_json(cd.changes_json, new_changes)
+    from datetime import datetime, timezone
+    cd.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(cd)
+    cd_dict = _change_draft_to_dict(cd, app)
+    return MutationResult(
+        success=True,
+        operation="patch_application_update_draft",
+        message="Pending changes updated.",
+        change_draft=cd_dict,
+        application=_application_to_dict(app),
+    )
+
+
+def handle_apply_application_update_draft(payload: MutationPayload, db: Session) -> MutationResult:
+    if payload.target.change_draft_id is None:
+        return _error("apply_application_update_draft", "change_draft_id is required")
+
+    cd = db.get(ApplicationChangeDraft, payload.target.change_draft_id)
+    if cd is None:
+        return _error("apply_application_update_draft", f"Change draft {payload.target.change_draft_id} not found")
+
+    app = db.get(JobApplication, cd.target_application_id)
+    if app is None:
+        db.delete(cd)
+        db.commit()
+        return _error("apply_application_update_draft", "Target application no longer exists")
+    if app.archived_at is not None:
+        return MutationResult(
+            success=False,
+            conflict=True,
+            operation="apply_application_update_draft",
+            message="Cannot apply changes: the application is archived. Restore it first or discard the pending changes.",
+        )
+
+    changes = cd.changes_json
+
+    # Build ApplicationChanges from stored JSON for validation
+    app_changes = ApplicationChanges(
+        company=changes.get("company"),
+        role=changes.get("role"),
+        status=changes.get("status"),
+        priority=changes.get("priority"),
+        location_mode=changes.get("location"),
+        job_link=changes.get("job_link"),
+        employment_types=changes.get("employment_types"),
+        current_stages=changes.get("current_stages"),
+        next_action=changes.get("next_action"),
+        comments=changes.get("comments"),
+        engaged_days=changes.get("engaged_days"),
+    )
+
+    enum_error = _validate_enum_fields(app_changes, "apply_application_update_draft")
+    if enum_error:
+        return enum_error
+
+    # Enforce uniqueness if company or role is changing
+    new_company_id = app.company_id
+    if app_changes.company is not None:
+        new_company_obj = get_or_create_company(db, app_changes.company)
+        new_company_id = new_company_obj.id
+    new_normalized_role = normalize_role_name(app_changes.role) if app_changes.role is not None else app.normalized_role
+
+    if app_changes.company is not None or app_changes.role is not None:
+        collision = (
+            db.query(JobApplication)
+            .filter(
+                JobApplication.company_id == new_company_id,
+                JobApplication.normalized_role == new_normalized_role,
+                JobApplication.id != app.id,
+            )
+            .first()
+        )
+        if collision is not None:
+            collision_company = collision.company_rel.name if collision.company_rel else str(new_company_id)
+            return MutationResult(
+                success=False,
+                conflict=True,
+                operation="apply_application_update_draft",
+                message=f"Cannot apply: an application for {collision_company} — {collision.role} already exists.",
+            )
+
+    # Capture old values for event logging
+    old_status = app.status
+    old_priority = app.priority
+    old_location = app.location
+    old_job_link = app.job_link
+    old_company = app.company
+    old_role = app.role
+    old_employment_types = list(app.employment_types_json)
+    old_current_stages = list(app.current_stages_json)
+
+    _apply_changes_to_application(app, app_changes, db)
+
+    if app_changes.status is not None and app.status != old_status:
+        _append_event(app.id, "status_changed", {"field": "status", "from": old_status, "to": app.status}, db)
+    if app_changes.priority is not None and app.priority != old_priority:
+        _append_event(app.id, "field_changed", {"field": "priority", "from": old_priority, "to": app.priority}, db)
+    if app_changes.location_mode is not None and app.location != old_location:
+        _append_event(app.id, "field_changed", {"field": "location", "from": old_location, "to": app.location}, db)
+    if app_changes.job_link is not None and app.job_link != old_job_link:
+        _append_event(app.id, "field_changed", {"field": "job_link", "from": old_job_link, "to": app.job_link}, db)
+    if app_changes.company is not None and app.company != old_company:
+        _append_event(app.id, "field_changed", {"field": "company", "from": old_company, "to": app.company}, db)
+    if app_changes.role is not None and app.role != old_role:
+        _append_event(app.id, "field_changed", {"field": "role", "from": old_role, "to": app.role}, db)
+    if app_changes.employment_types is not None and app.employment_types_json != old_employment_types:
+        _append_event(app.id, "field_changed", {"field": "employment_types", "from": old_employment_types, "to": app.employment_types_json}, db)
+    if app_changes.current_stages is not None and app.current_stages_json != old_current_stages:
+        _append_event(app.id, "field_changed", {"field": "current_stages", "from": old_current_stages, "to": app.current_stages_json}, db)
+
+    db.delete(cd)
+    db.commit()
+    db.refresh(app)
+    return MutationResult(
+        success=True,
+        operation="apply_application_update_draft",
+        message="Changes applied.",
+        application=_application_to_dict(app),
+    )
+
+
+def handle_discard_application_update_draft(payload: MutationPayload, db: Session) -> MutationResult:
+    if payload.target.change_draft_id is None:
+        return _error("discard_application_update_draft", "change_draft_id is required")
+
+    cd = db.get(ApplicationChangeDraft, payload.target.change_draft_id)
+    if cd is None:
+        return _error("discard_application_update_draft", f"Change draft {payload.target.change_draft_id} not found")
+
+    db.delete(cd)
+    db.commit()
+    return MutationResult(
+        success=True,
+        operation="discard_application_update_draft",
+        message="Pending changes discarded.",
+    )
+
+
 def dispatch(payload: MutationPayload, db: Session) -> MutationResult:
     if payload.operation not in ALLOWED_OPERATIONS:
         return _error(payload.operation, f"Unknown operation '{payload.operation}'")
@@ -626,5 +944,9 @@ def dispatch(payload: MutationPayload, db: Session) -> MutationResult:
         "archive_application": handle_archive_application,
         "restore_application": handle_restore_application,
         "delete_application_permanently": handle_delete_application_permanently,
+        "create_application_update_draft": handle_create_application_update_draft,
+        "patch_application_update_draft": handle_patch_application_update_draft,
+        "apply_application_update_draft": handle_apply_application_update_draft,
+        "discard_application_update_draft": handle_discard_application_update_draft,
     }
     return handlers[payload.operation](payload, db)

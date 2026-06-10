@@ -314,13 +314,14 @@ class TranscriptParseRequest(BaseModel):
 
 class SemanticTranscriptResponse(BaseModel):
     status: Literal["preview", "clarification_required", "unsupported", "unavailable"]
-    operation: Literal["create", "update", "none"]
+    operation: Literal["create", "update", "pending_changes", "none"]
     raw_transcript: str
     proposal: SemanticToolCallProposal
     application_id: int | None = None
     draft_id: str | None = None
     draft: JobApplicationBase | None = None
     drafts: list[JobApplicationCreate] = Field(default_factory=list)
+    change_draft: dict | None = None
     warnings: list[str] = Field(default_factory=list)
     needs_confirmation: bool = False
     confirmation_kind: Literal["none", "multi_application", "context"] = "none"

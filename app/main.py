@@ -29,12 +29,12 @@ from .constants import (
 from .database import get_db
 from .livekit_config import LiveKitConfigurationError, get_livekit_settings
 from .migrations import run_startup_migrations_if_enabled
-from .models import ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, Company, CompanyAlias, JobApplication
+from .models import ApplicationChangeDraft, ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, Company, CompanyAlias, JobApplication
 from .mutation_dispatcher import dispatch
 from .mutation_schemas import MutationPayload, MutationTarget, ApplicationChanges
-from .public_schemas import PublicApplicationDTO, PublicTranscriptResponse
-from .role_resolution import normalize_role_name
-from .transcript_response_adapter import to_public_application, to_public_transcript_response
+from .public_schemas import PublicApplicationChangeDraftDTO, PublicApplicationDTO, PublicTranscriptResponse
+from .role_resolution import find_application_by_company_role, normalize_role_name
+from .transcript_response_adapter import to_public_application, to_public_change_draft, to_public_transcript_response
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
     ApplicationCreateCandidateRequest,
@@ -52,7 +52,7 @@ from .schemas import (
     TranscriptParseRequest,
 )
 from .semantic_interpreter import OllamaSemanticInterpreter, get_semantic_interpreter
-from .semantic_validation import interpret_transcript_command, normalize_role_title
+from .semantic_validation import interpret_transcript_command
 
 
 @asynccontextmanager
@@ -113,15 +113,6 @@ def create_job_application(db: Session, payload: JobApplicationCreate) -> JobApp
     db.add(application)
     db.flush()
     return application
-
-
-def find_duplicate_role(db: Session, company_name: str, incoming_role: str) -> bool:
-    """Return True if there is already a non-archived saved application at this company with this role."""
-    normalized_incoming = normalize_role_title(incoming_role).casefold()
-    for application in get_application_matches_for_company(db, company_name):
-        if normalize_role_title(application.role).casefold() == normalized_incoming:
-            return True
-    return False
 
 
 def maybe_create_alias(
@@ -303,6 +294,59 @@ async def discard_draft(draft_id: int, db: Session = Depends(get_db)) -> Respons
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.get("/application-change-drafts/{change_draft_id}", response_model=PublicApplicationChangeDraftDTO)
+async def get_application_change_draft(change_draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationChangeDraftDTO:
+    cd = db.get(ApplicationChangeDraft, change_draft_id)
+    if cd is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Change draft {change_draft_id} not found")
+    app_row = db.get(JobApplication, cd.target_application_id)
+    if app_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target application not found")
+    from .mutation_dispatcher import _change_draft_to_dict
+    cd_dict = _change_draft_to_dict(cd, app_row)
+    dto = to_public_change_draft(cd_dict)
+    if dto is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to build change draft DTO")
+    return dto
+
+
+@app.post("/application-change-drafts/{change_draft_id}/apply", response_model=PublicApplicationDTO)
+async def apply_application_change_draft(change_draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationDTO:
+    cd = db.get(ApplicationChangeDraft, change_draft_id)
+    if cd is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Change draft {change_draft_id} not found")
+
+    mutation = MutationPayload(
+        operation="apply_application_update_draft",
+        target=MutationTarget(change_draft_id=change_draft_id),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(mutation, db)
+    if not result.success:
+        http_status = status.HTTP_409_CONFLICT if result.conflict else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=http_status, detail=result.message)
+
+    return to_public_application(result.application)
+
+
+@app.post("/application-change-drafts/{change_draft_id}/discard", status_code=status.HTTP_200_OK)
+async def discard_application_change_draft(change_draft_id: int, db: Session = Depends(get_db)) -> dict:
+    cd = db.get(ApplicationChangeDraft, change_draft_id)
+    if cd is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Change draft {change_draft_id} not found")
+
+    mutation = MutationPayload(
+        operation="discard_application_update_draft",
+        target=MutationTarget(change_draft_id=change_draft_id),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(mutation, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+
+    return {"message": result.message}
+
+
 @app.get("/applications/archived", response_model=list[PublicApplicationDTO])
 async def list_archived_applications(db: Session = Depends(get_db)) -> list[PublicApplicationDTO]:
     rows = (
@@ -396,7 +440,9 @@ async def create_application_candidate(
            | {"company": resolved_company_name})
     )
 
-    if find_duplicate_role(db, resolved_company_name, application_payload.role):
+    company_obj = get_or_create_company(db, resolved_company_name)
+    existing = find_application_by_company_role(db, company_id=company_obj.id, role=application_payload.role)
+    if existing is not None and not existing.is_draft:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Application for {resolved_company_name} — {application_payload.role} already exists.",
@@ -424,6 +470,15 @@ async def confirm_company_and_create_application(
         **(payload.model_dump(exclude={"confirmed_company_name", "raw_transcript", "original_extracted_company_name", "audio_reference"})
            | {"company": final_company_name})
     )
+
+    company_obj_for_check = get_or_create_company(db, final_company_name)
+    existing_check = find_application_by_company_role(db, company_id=company_obj_for_check.id, role=application_payload.role)
+    if existing_check is not None and not existing_check.is_draft:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Application for {final_company_name} — {application_payload.role} already exists.",
+        )
+
     application = create_job_application(db, application_payload)
 
     alias_created = maybe_create_alias(db, canonical_company, payload.original_extracted_company_name)

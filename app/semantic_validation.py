@@ -82,6 +82,10 @@ def build_transcript_response_from_mutation(
         "append_note": "none",
         "archive_application": "none",
         "restore_application": "none",
+        "create_application_update_draft": "pending_changes",
+        "patch_application_update_draft": "pending_changes",
+        "apply_application_update_draft": "update",
+        "discard_application_update_draft": "none",
     }
     op = operation_map.get(mutation_result.operation, "none")
     effective_draft = draft
@@ -105,6 +109,7 @@ def build_transcript_response_from_mutation(
         proposal=proposal,
         draft=effective_draft,
         draft_id=effective_draft_id,
+        change_draft=mutation_result.change_draft,
         warnings=warnings or [],
         needs_confirmation=needs_confirmation,
         confirmation_kind=confirmation_kind,
@@ -722,8 +727,27 @@ def handle_preview_existing_application_update(
             interpreter_metrics=metrics,
         )
 
+    # Check: is there already a pending-changes draft for a *different* application?
+    from .models import ApplicationChangeDraft as _ACD
+    active_cd = db.query(_ACD).first()
+    if active_cd is not None and active_cd.target_application_id != application.id:
+        conflict_app = db.get(JobApplication, active_cd.target_application_id)
+        conflict_label = f"{conflict_app.company} — {conflict_app.role}" if conflict_app else f"application #{active_cd.target_application_id}"
+        return SemanticTranscriptResponse(
+            status="clarification_required",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=target_warnings,
+            clarification_question=(
+                f"You already have unsaved changes for {conflict_label}. "
+                f"Apply or discard them before editing another application."
+            ),
+            interpreter_metrics=metrics,
+        )
+
     mutation_payload = MutationPayload(
-        operation="patch_application",
+        operation="create_application_update_draft",
         target=MutationTarget(application_id=application.id),
         changes=ApplicationChanges(
             status=validated_fields.status or None,
@@ -733,6 +757,9 @@ def handle_preview_existing_application_update(
             role=validated_fields.role or None,
             employment_types=list(validated_fields.employment_types) if validated_fields.employment_types else None,
             current_stages=list(validated_fields.current_stages) if validated_fields.current_stages else None,
+            next_action=validated_fields.next_action or None,
+            comments=validated_fields.comments or None,
+            engaged_days=validated_fields.engaged_days if validated_fields.engaged_days is not None else None,
         ),
     )
     mutation_result = dispatch(mutation_payload, db)

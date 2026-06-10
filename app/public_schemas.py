@@ -27,6 +27,17 @@ class PublicApplicationDTO(BaseModel):
     updated_at: datetime | None
 
 
+class PublicApplicationChangeDraftDTO(BaseModel):
+    id: int
+    kind: str
+    target_application_id: int
+    original: PublicApplicationDTO
+    preview: PublicApplicationDTO
+    changed_fields: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
 TranscriptStatus = Literal[
     "draft_created",
     "draft_updated",
@@ -36,6 +47,10 @@ TranscriptStatus = Literal[
     "clarification",
     "no_change",
     "error",
+    "pending_changes_created",
+    "pending_changes_updated",
+    "changes_applied",
+    "changes_discarded",
 ]
 
 
@@ -46,5 +61,6 @@ class PublicTranscriptResponse(BaseModel):
     draft_id: str | None = None
     draft: PublicApplicationDTO | None = None
     application: PublicApplicationDTO | None = None
+    pending_changes: PublicApplicationChangeDraftDTO | None = None
     warnings: list[str] = []
     clarification_question: str | None = None

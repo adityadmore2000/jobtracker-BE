@@ -154,6 +154,7 @@ def test_alembic_upgrades_fresh_job_tracker_test_database_successfully() -> None
 
     assert table_names == {
         "alembic_version",
+        "application_change_drafts",
         "application_events",
         "application_notes",
         "asr_company_correction_events",
