@@ -159,3 +159,88 @@ async def test_save_missing_draft_returns_404(client, db):
 async def test_discard_missing_draft_returns_404(client, db):
     response = await client.post("/drafts/999999/discard")
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Draft PATCH collision tests (Phase 1.5B)
+# ---------------------------------------------------------------------------
+
+
+def _create_saved_application(db, company: str, role: str) -> int:
+    """Create and promote a draft → saved application, returning its id."""
+    create = MutationPayload(
+        operation="create_draft",
+        target=MutationTarget(),
+        changes=ApplicationChanges(company=company, role=role),
+    )
+    r = dispatch(create, db)
+    assert r.success
+    draft_id = str(r.draft["id"])
+    save = MutationPayload(
+        operation="save_draft",
+        target=MutationTarget(draft_id=draft_id),
+        changes=ApplicationChanges(),
+    )
+    rs = dispatch(save, db)
+    assert rs.success
+    return rs.application["id"]
+
+
+@pytest.mark.anyio
+async def test_patch_draft_role_collision_returns_409(client, db):
+    """Draft role changed to match an existing saved row → HTTP 409."""
+    _create_saved_application(db, "Rockwell", "AI Engineer")
+    draft_id = _create_draft(db, company="Rockwell", role="GET")
+
+    response = await client.patch(f"/drafts/{draft_id}", json={"role": "AI Engineer"})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "Rockwell" in detail
+    assert "AI Engineer" in detail
+
+
+@pytest.mark.anyio
+async def test_patch_draft_role_collision_draft_unchanged(client, db):
+    """After a 409 the draft row is not mutated."""
+    from app.models import JobApplication
+
+    _create_saved_application(db, "Rockwell", "AI Engineer")
+    draft_id = _create_draft(db, company="Rockwell", role="GET")
+
+    await client.patch(f"/drafts/{draft_id}", json={"role": "AI Engineer"})
+
+    row = db.get(JobApplication, draft_id)
+    db.refresh(row)
+    assert row.role == "GET"
+
+
+@pytest.mark.anyio
+async def test_patch_draft_company_collision_returns_409(client, db):
+    """Draft company changed so that company+role matches an existing saved row → HTTP 409."""
+    _create_saved_application(db, "Neilsoft", "AI Engineer")
+    draft_id = _create_draft(db, company="Rockwell", role="AI Engineer")
+
+    response = await client.patch(f"/drafts/{draft_id}", json={"company": "Neilsoft"})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "Neilsoft" in detail
+
+
+@pytest.mark.anyio
+async def test_patch_draft_role_no_collision_succeeds(client, db):
+    """Changing a draft role to one that does not collide succeeds."""
+    _create_saved_application(db, "Rockwell", "AI Engineer")
+    draft_id = _create_draft(db, company="Rockwell", role="GET")
+
+    response = await client.patch(f"/drafts/{draft_id}", json={"role": "Graduate Engineer Trainee"})
+    assert response.status_code == 200
+    assert response.json()["role"] == "Graduate Engineer Trainee"
+
+
+@pytest.mark.anyio
+async def test_patch_draft_self_collision_not_triggered(client, db):
+    """Patching a draft with the same (or normalized-same) role it already has never collides with itself."""
+    draft_id = _create_draft(db, company="Rockwell", role="AI Engineer")
+
+    response = await client.patch(f"/drafts/{draft_id}", json={"role": "ai engineer"})
+    assert response.status_code == 200

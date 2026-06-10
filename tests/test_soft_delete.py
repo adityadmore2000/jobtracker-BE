@@ -128,17 +128,15 @@ def test_archive_draft_returns_error(db):
 
 
 @pytest.mark.anyio
-async def test_delete_endpoint_returns_confirmation_prompt(client, db):
+async def test_delete_endpoint_active_row_rejected(client, db):
+    """DELETE on an active (non-archived) saved row returns 400 — must archive first."""
     app_id = create_saved_application(db, company="PromptCo")
 
     response = await client.delete(f"/applications/{app_id}")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["requires_confirmation"] is True
-    assert body["confirmation_kind"] == "archive"
-    assert body["application_id"] == app_id
+    assert response.status_code == 400
+    assert "Only archived" in response.json()["detail"]
 
-    # Row must NOT be deleted
+    # Row must NOT be deleted.
     saved_app = db.get(JobApplication, app_id)
     assert saved_app is not None
 

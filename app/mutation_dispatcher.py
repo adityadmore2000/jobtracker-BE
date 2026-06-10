@@ -35,6 +35,7 @@ _OPERATION_TO_TRANSCRIPT_OP: dict[str, str] = {
     "append_note": "none",
     "archive_application": "none",
     "restore_application": "none",
+    "delete_application_permanently": "none",
 }
 
 assert set(_OPERATION_TO_TRANSCRIPT_OP.keys()) == ALLOWED_OPERATIONS, (
@@ -274,6 +275,39 @@ def handle_patch_draft(payload: MutationPayload, db: Session) -> MutationResult:
         app = db.get(JobApplication, draft_id)
         if app is None or not app.is_draft:
             return _error("patch_draft", f"Draft with id {draft_id} not found")
+
+        # Pre-flight uniqueness check when company or role is changing.
+        company_changing = payload.changes.company is not None
+        role_changing = payload.changes.role is not None
+        if company_changing or role_changing:
+            if company_changing:
+                new_company_obj = get_or_create_company(db, payload.changes.company)
+                new_company_id = new_company_obj.id
+                new_company_name = new_company_obj.name
+            else:
+                new_company_id = app.company_id
+                new_company_name = app.company
+            new_normalized_role = (
+                normalize_role_name(payload.changes.role) if role_changing else app.normalized_role
+            )
+            new_role_display = payload.changes.role if role_changing else app.role
+            collision = (
+                db.query(JobApplication)
+                .filter(
+                    JobApplication.company_id == new_company_id,
+                    JobApplication.normalized_role == new_normalized_role,
+                    JobApplication.id != app.id,
+                )
+                .first()
+            )
+            if collision is not None:
+                return MutationResult(
+                    success=False,
+                    conflict=True,
+                    operation="patch_draft",
+                    message=f"An application for {new_company_name} — {new_role_display} already exists.",
+                )
+
         _apply_changes_to_application(app, payload.changes, db)
         db.commit()
         db.refresh(app)
@@ -545,6 +579,34 @@ def handle_restore_application(payload: MutationPayload, db: Session) -> Mutatio
     )
 
 
+def handle_delete_application_permanently(payload: MutationPayload, db: Session) -> MutationResult:
+    if payload.target.application_id is None:
+        return _error("delete_application_permanently", "application_id is required in target for delete_application_permanently")
+
+    app = db.get(JobApplication, payload.target.application_id)
+    if app is None:
+        return _error("delete_application_permanently", f"Application {payload.target.application_id} not found")
+    if app.is_draft:
+        return _error(
+            "delete_application_permanently",
+            "Drafts must be discarded through the draft workflow.",
+        )
+    if app.archived_at is None:
+        return _error(
+            "delete_application_permanently",
+            "Only archived applications can be permanently deleted.",
+        )
+
+    # Notes and events are removed via cascade="all, delete-orphan" on the relationship.
+    db.delete(app)
+    db.commit()
+    return MutationResult(
+        success=True,
+        operation="delete_application_permanently",
+        message="Application permanently deleted.",
+    )
+
+
 def _changes_to_dict(changes: ApplicationChanges) -> dict:
     return {k: v for k, v in changes.model_dump().items() if v is not None}
 
@@ -563,5 +625,6 @@ def dispatch(payload: MutationPayload, db: Session) -> MutationResult:
         "append_note": handle_append_note,
         "archive_application": handle_archive_application,
         "restore_application": handle_restore_application,
+        "delete_application_permanently": handle_delete_application_permanently,
     }
     return handlers[payload.operation](payload, db)

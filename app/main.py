@@ -251,7 +251,8 @@ async def patch_draft(
     )
     result = dispatch(mutation, db)
     if not result.success:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+        http_status = status.HTTP_409_CONFLICT if result.conflict else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=http_status, detail=result.message)
 
     if payload.engaged_days is not None:
         app_row.engaged_days = payload.engaged_days
@@ -503,18 +504,20 @@ async def update_application(
     return application
 
 
-@app.delete("/applications/{application_id}")
-async def delete_application(application_id: int, db: Session = Depends(get_db)) -> dict:
+@app.delete("/applications/{application_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_application_permanently(application_id: int, db: Session = Depends(get_db)) -> Response:
     application = db.get(JobApplication, application_id)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
-    role_label = application.role or "application"
-    return {
-        "requires_confirmation": True,
-        "confirmation_kind": "archive",
-        "message": f"Archive {application.company} — {role_label}?",
-        "application_id": application_id,
-    }
+    payload = MutationPayload(
+        operation="delete_application_permanently",
+        target=MutationTarget(application_id=application_id),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(payload, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/applications/{application_id}/archive")

@@ -13,6 +13,7 @@ ALLOWED_OPERATIONS = {
     "append_note",
     "archive_application",
     "restore_application",
+    "delete_application_permanently",
 }
 
 
@@ -43,6 +44,7 @@ class MutationResult(BaseModel):
     success: bool
     operation: str
     message: str
+    conflict: bool = False
     draft: Optional[dict] = None
     application: Optional[dict] = None
     requires_confirmation: bool = False

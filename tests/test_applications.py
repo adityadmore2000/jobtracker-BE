@@ -2118,14 +2118,13 @@ async def test_update_status_rejects_unknown_string(client):
 
 
 @pytest.mark.anyio
-async def test_delete_application(client):
+async def test_delete_application_active_row_rejected(client):
+    """DELETE /applications/{id} on an active (non-archived) row returns 400."""
     created = await create_record(client)
     response = await client.delete(f"/applications/{created['id']}")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["requires_confirmation"] is True
-    assert body["confirmation_kind"] == "archive"
-    # Row is NOT deleted — use POST /archive to actually archive
+    assert response.status_code == 400
+    assert "Only archived" in response.json()["detail"]
+    # Row is NOT deleted.
     still_there = await client.get(f"/applications/{created['id']}")
     assert still_there.status_code == 200
 
@@ -2153,19 +2152,12 @@ async def test_delete_application_preserves_asr_correction_history_and_nulls_app
         },
     )
 
-    delete_response = await client.delete(f"/applications/{created['id']}")
-    assert delete_response.status_code == 200
-    assert delete_response.json()["requires_confirmation"] is True
-
-    # Hard delete via archive + direct DB delete to test correction event behavior
+    # Archive first, then permanently delete via the endpoint.
     archive_response = await client.post(f"/applications/{created['id']}/archive")
     assert archive_response.status_code == 200
 
-    # Now actually hard-delete via DB to test ASR event behavior
-    with SessionLocal() as db:
-        app_obj = db.get(JobApplication, created["id"])
-        db.delete(app_obj)
-        db.commit()
+    delete_response = await client.delete(f"/applications/{created['id']}")
+    assert delete_response.status_code == 204
 
     missing = await client.get(f"/applications/{created['id']}")
     assert missing.status_code == 404
@@ -2201,15 +2193,17 @@ async def test_delete_application_preserves_asr_correction_history_and_nulls_app
 
 @pytest.mark.anyio
 async def test_delete_application_without_correction_events_still_works(client):
+    """Permanent delete of an archived application with no ASR events succeeds cleanly."""
     created = await create_record(client)
 
-    response = await client.delete(f"/applications/{created['id']}")
+    archive_response = await client.post(f"/applications/{created['id']}/archive")
+    assert archive_response.status_code == 200
 
-    assert response.status_code == 200
-    assert response.json()["requires_confirmation"] is True
-    # Row not deleted — still accessible
-    still_there = await client.get(f"/applications/{created['id']}")
-    assert still_there.status_code == 200
+    response = await client.delete(f"/applications/{created['id']}")
+    assert response.status_code == 204
+
+    missing = await client.get(f"/applications/{created['id']}")
+    assert missing.status_code == 404
 
 
 @pytest.mark.anyio
