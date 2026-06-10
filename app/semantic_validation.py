@@ -25,7 +25,9 @@ from .semantic_interpreter import (
     SemanticInterpreterUnavailableError,
 )
 from .semantic_schemas import (
+    ArchiveApplicationArguments,
     AskClarificationArguments,
+    ExplainDeletePolicyArguments,
     PatchActiveDraftArguments,
     PreviewExistingApplicationTarget,
     PreviewExistingApplicationUpdateArguments,
@@ -80,8 +82,8 @@ def build_transcript_response_from_mutation(
         "discard_draft": "none",
         "ask_clarification": "none",
         "append_note": "none",
-        "archive_application": "none",
-        "restore_application": "none",
+        "archive_application": "update",
+        "restore_application": "update",
         "create_application_update_draft": "pending_changes",
         "patch_application_update_draft": "pending_changes",
         "apply_application_update_draft": "update",
@@ -323,11 +325,56 @@ def validate_fields(fields: SemanticFieldPatch, *, tool_name: str | None = None)
     )
 
 
+def _reconcile_controlled_field_misclassification(fields: SemanticFieldPatch) -> SemanticFieldPatch:
+    """Move a controlled value to the correct field when it was unambiguously misclassified.
+
+    Only repairs when:
+    - The value is invalid for the extracted field
+    - Valid for exactly one other controlled field
+    - The destination field is unset (or list is empty)
+    Does not overwrite an already-populated destination.
+    """
+    result = fields.model_copy()
+
+    # Check for a single employment_type item that is actually a valid location
+    if fields.employment_types is not None and len(fields.employment_types) == 1:
+        candidate = fields.employment_types[0]
+        candidate_normalized = _normalize_lookup_text(candidate)
+        # Invalid as employment type?
+        if candidate_normalized not in EMPLOYMENT_TYPE_ALIASES:
+            # Valid as location?
+            canonical_location = LOCATION_ALIASES.get(candidate_normalized)
+            if canonical_location is not None and canonical_location in ALLOWED_LOCATIONS:
+                # Destination (location) unset or empty?
+                if fields.location is None:
+                    logger.info(
+                        "semantic_field_reconciliation field=employment_types candidate=%r -> location=%r",
+                        candidate,
+                        canonical_location,
+                    )
+                    result = result.model_copy(update={"employment_types": None, "location": canonical_location})
+
+    # Check for a location value that is actually a valid employment type
+    if fields.location is not None:
+        loc_normalized = _normalize_lookup_text(fields.location)
+        if loc_normalized not in LOCATION_ALIASES:
+            canonical_employment_type = EMPLOYMENT_TYPE_ALIASES.get(loc_normalized)
+            if canonical_employment_type is not None and canonical_employment_type in ALLOWED_EMPLOYMENT_TYPES:
+                if fields.employment_types is None or fields.employment_types == []:
+                    logger.info(
+                        "semantic_field_reconciliation field=location candidate=%r -> employment_types=%r",
+                        fields.location,
+                        canonical_employment_type,
+                    )
+                    result = result.model_copy(update={"location": None, "employment_types": [canonical_employment_type]})
+
+    return result
+
+
 def normalize_extracted_fields(fields: SemanticExtractedFields) -> tuple[SemanticFieldPatch | None, list[str]]:
-    return validate_fields(
-        SemanticFieldPatch.model_validate(fields.model_dump(exclude_none=True)),
-        tool_name="semantic_field_extraction",
-    )
+    patch = SemanticFieldPatch.model_validate(fields.model_dump(exclude_none=True))
+    reconciled = _reconcile_controlled_field_misclassification(patch)
+    return validate_fields(reconciled, tool_name="semantic_field_extraction")
 
 
 def describe_application(application: JobApplication) -> str:
@@ -337,6 +384,9 @@ def describe_application(application: JobApplication) -> str:
 
 
 def build_ambiguous_update_question(company: str, matches: list[JobApplication]) -> str:
+    role_list = ", ".join(f'"{app.role}"' for app in matches if app.role)
+    if role_list:
+        return f"Which {company} application do you mean? {role_list}"
     return CLARIFICATION_AMBIGUOUS_APPLICATION
 
 
@@ -707,12 +757,13 @@ def handle_preview_existing_application_update(
             interpreter_metrics=metrics,
         )
     if application is None:
+        message = target_warnings[0] if target_warnings else "I could not find that application."
         return SemanticTranscriptResponse(
-            status="clarification_required",
+            status="unsupported",
             operation="none",
             raw_transcript=payload.transcript,
             proposal=proposal,
-            warnings=target_warnings,
+            warnings=[message],
             interpreter_metrics=metrics,
         )
 
@@ -925,6 +976,113 @@ def handle_ask_clarification(
         proposal=proposal,
         clarification_question=arguments.question,
         interpreter_metrics=metrics,
+    )
+
+
+def handle_archive_application(
+    db: Session,
+    payload: TranscriptParseRequest,
+    proposal: SemanticToolCallProposal,
+    arguments: ArchiveApplicationArguments,
+    metrics,
+) -> SemanticTranscriptResponse:
+    context = build_context_payload(payload)
+    application, target_warnings, clarification_question = resolve_existing_application_target(db, arguments.target, context)
+    if clarification_question:
+        return SemanticTranscriptResponse(
+            status="clarification_required",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=target_warnings,
+            clarification_question=clarification_question,
+            interpreter_metrics=metrics,
+        )
+    if application is None:
+        message = target_warnings[0] if target_warnings else "I could not find that application."
+        return SemanticTranscriptResponse(
+            status="unsupported",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=[message],
+            interpreter_metrics=metrics,
+        )
+    if application.archived_at is not None:
+        return SemanticTranscriptResponse(
+            status="unsupported",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=["This application is already archived."],
+            interpreter_metrics=metrics,
+        )
+
+    mutation_payload = MutationPayload(
+        operation="archive_application",
+        target=MutationTarget(application_id=application.id),
+        changes=ApplicationChanges(),
+    )
+    mutation_result = dispatch(mutation_payload, db)
+    return build_transcript_response_from_mutation(
+        mutation_result,
+        payload,
+        proposal,
+        metrics=metrics,
+        warnings=target_warnings,
+        application_id=application.id,
+    )
+
+
+def handle_explain_delete_policy(
+    db: Session,
+    payload: TranscriptParseRequest,
+    proposal: SemanticToolCallProposal,
+    arguments: ExplainDeletePolicyArguments,
+    metrics,
+) -> SemanticTranscriptResponse:
+    context = build_context_payload(payload)
+    application, target_warnings, clarification_question = resolve_existing_application_target(db, arguments.target, context)
+    if clarification_question:
+        return SemanticTranscriptResponse(
+            status="clarification_required",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=target_warnings,
+            clarification_question=clarification_question,
+            interpreter_metrics=metrics,
+        )
+    if application is None:
+        message = target_warnings[0] if target_warnings else "I could not find that application."
+        return SemanticTranscriptResponse(
+            status="unsupported",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=[message],
+            interpreter_metrics=metrics,
+        )
+
+    if application.archived_at is not None:
+        guidance = "This application is archived. Use Delete Permanently in the archived view to remove it irreversibly."
+    else:
+        guidance = "This application is active. Archive it first before deleting it permanently."
+
+    question = guidance
+    mutation_payload_obj = MutationPayload(
+        operation="ask_clarification",
+        target=MutationTarget(),
+        changes=ApplicationChanges(),
+        notes_to_append=[question],
+    )
+    mutation_result = dispatch(mutation_payload_obj, db)
+    return build_transcript_response_from_mutation(
+        mutation_result,
+        payload,
+        proposal,
+        metrics=metrics,
+        warnings=[],
     )
 
 
@@ -1273,6 +1431,10 @@ def validate_tool_arguments_with_safe_normalization(proposal: SemanticToolCallPr
         return normalized_proposal, RequestDraftSaveArguments.model_validate(normalized_proposal.arguments)
     if normalized_proposal.tool_name == "ask_clarification":
         return normalized_proposal, AskClarificationArguments.model_validate(normalized_proposal.arguments)
+    if normalized_proposal.tool_name == "archive_application":
+        return normalized_proposal, ArchiveApplicationArguments.model_validate(normalized_proposal.arguments)
+    if normalized_proposal.tool_name == "explain_delete_policy":
+        return normalized_proposal, ExplainDeletePolicyArguments.model_validate(normalized_proposal.arguments)
     return normalized_proposal, None
 
 
@@ -1513,6 +1675,12 @@ def interpret_transcript_command(
     if proposal.tool_name == "ask_clarification":
         arguments = validated_arguments
         return handle_ask_clarification(payload, proposal, arguments, metrics, db=db)
+    if proposal.tool_name == "archive_application":
+        arguments = validated_arguments
+        return handle_archive_application(db, payload, proposal, arguments, metrics)
+    if proposal.tool_name == "explain_delete_policy":
+        arguments = validated_arguments
+        return handle_explain_delete_policy(db, payload, proposal, arguments, metrics)
 
     return SemanticTranscriptResponse(
         status="unsupported",

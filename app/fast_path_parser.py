@@ -153,7 +153,7 @@ def try_parse(transcript: str, context: dict) -> MutationPayload | None:
         return MutationPayload(
             operation=operation,
             target=target,
-            changes=ApplicationChanges(location_mode="onsite"),
+            changes=ApplicationChanges(location_mode="on-site"),
         )
 
     # Mark applied

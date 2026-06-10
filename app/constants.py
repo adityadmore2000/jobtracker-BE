@@ -26,7 +26,7 @@ ALLOWED_EMPLOYMENT_TYPES = [
 ALLOWED_LOCATIONS = [
     "remote",
     "hybrid",
-    "onsite",
+    "on-site",
 ]
 
 ALLOWED_CURRENT_STAGES = [
@@ -53,9 +53,10 @@ STATUS_OPTIONS = [
 
 # Maps normalized alias text → canonical STATUS_OPTIONS value.
 # Aliases must never become gatekeeping: only well-known variants are listed.
+# Keys use space as the only separator (hyphens/underscores are normalised
+# to spaces before lookup by normalize_status_value).
 STATUS_ALIASES: dict[str, str] = {
-    "in touch": "in_touch",
-    "in_touch": "in_touch",
+    "in touch": "in_touch",  # covers "in-touch" and "in_touch" after sep normalisation
     "applied": "applied",
     "submitted application": "applied",
     "application sent": "applied",
@@ -72,10 +73,11 @@ STATUS_ALIASES: dict[str, str] = {
 def normalize_status_value(value: str) -> str | None:
     """Return canonical status for *value*, or None if unrecognised.
 
-    Matching is case-insensitive and collapses internal whitespace.
+    Matching is case-insensitive, collapses internal whitespace, and
+    treats hyphens, underscores, and spaces as equivalent separators.
     Returns None for any value not in STATUS_OPTIONS or STATUS_ALIASES.
     """
-    key = " ".join(value.strip().replace("_", " ").casefold().split())
+    key = " ".join(value.strip().replace("-", " ").replace("_", " ").casefold().split())
     if key in STATUS_ALIASES:
         return STATUS_ALIASES[key]
     # Accept already-canonical lower-snake values directly
@@ -112,9 +114,9 @@ LOCATION_ALIASES: dict[str, str] = {
     "work from home": "remote",
     "wfh": "remote",
     "hybrid": "hybrid",
-    "onsite": "onsite",
-    "on site": "onsite",
-    "on-site": "onsite",
+    "onsite": "on-site",
+    "on site": "on-site",
+    "on-site": "on-site",
 }
 _LOC_ALIAS_TARGETS = set(LOCATION_ALIASES.values())
 assert _LOC_ALIAS_TARGETS.issubset(set(ALLOWED_LOCATIONS)), (

@@ -110,6 +110,8 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
         "request_draft_save",
         "attach_latest_browser_context",
         "ask_clarification",
+        "archive_application",
+        "explain_delete_policy",
     }
     assert "format" not in selection_call["json"]
 
@@ -148,7 +150,7 @@ def test_build_field_extraction_messages_include_examples_and_retry_hint() -> No
     assert len(messages) == 2
     assert "Do not select a tool." in messages[0]["content"]
     assert "Ignore conversational filler." in messages[0]["content"]
-    assert "The role field is a free-form job title emitted as a single string (not an array)." in messages[0]["content"]
+    assert "The role field is free-form open-ended text emitted as a single string (not an array)." in messages[0]["content"]
     assert "It's called Neilsoft. I'd like to track AI Engineer application for this position." in messages[0]["content"]
     assert '"explicit_known_companies_in_current_utterance": ["Neilsoft"]' in messages[1]["content"]
     assert '"field_extraction_retry_hint": "Return only valid JSON matching the extraction schema."' in messages[1]["content"]

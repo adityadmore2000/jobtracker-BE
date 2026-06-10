@@ -8,9 +8,12 @@ from pydantic import ValidationError
 
 from .database_config import get_optional_env_value
 from .semantic_schemas import (
+    ArchiveApplicationArguments,
     AskClarificationArguments,
     AttachLatestBrowserContextArguments,
+    ExplainDeletePolicyArguments,
     PatchActiveDraftArguments,
+    PreviewExistingApplicationTarget,
     PreviewExistingApplicationUpdateArguments,
     RequestDraftSaveArguments,
     SemanticExtractedFields,
@@ -37,6 +40,8 @@ TOOL_ARGUMENT_MODELS = {
     "request_draft_save": RequestDraftSaveArguments,
     "attach_latest_browser_context": AttachLatestBrowserContextArguments,
     "ask_clarification": AskClarificationArguments,
+    "archive_application": ArchiveApplicationArguments,
+    "explain_delete_policy": ExplainDeletePolicyArguments,
 }
 
 
@@ -119,6 +124,10 @@ def build_ollama_messages(transcript: str, context: dict[str, object] | None) ->
                 "Emit canonical field names such as company, role, employment_types, location, status, priority, current_stages, comments, and next_action. "
                 "Extract the company into fields.company. "
                 "Extract the role into fields.role as a single string (not an array). "
+                "Role titles are open-ended free-form text. Extract any non-empty role title exactly as stated. "
+                "Examples of valid roles: 'AI Engineer', 'founding engineer', 'LLM Inference Optimization Engineer', 'Head of Product'. "
+                "These examples are illustrative only — any non-empty role string is valid. "
+                "Do not reject a role because it is unfamiliar or not in any list. "
                 "For list-valued fields such as employment_types and current_stages, always emit JSON arrays. "
                 "The role field is a single scalar string, not an array. Do not wrap it in brackets. "
                 "Extract only the value. Do not include connector words such as \"for\", \"set\", or \"to\" inside values. "
@@ -145,7 +154,12 @@ def build_ollama_messages(transcript: str, context: dict[str, object] | None) ->
                 "\"Make it high priority\" without explicit company and without selected persisted row -> ask_clarification({\"question\":\"Which company's application do you mean?\"}). "
                 "\"Add application\" without company and without active draft -> ask_clarification({\"question\":\"Which company should I use?\"}). "
                 "\"save it\" with active draft -> request_draft_save({}). "
-                "\"save it\" without active draft -> ask_clarification({\"question\":\"There is no active draft to save.\"})."
+                "\"save it\" without active draft -> ask_clarification({\"question\":\"There is no active draft to save.\"}). "
+                "\"archive Google AI Engineer application\" -> archive_application({\"target\":{\"company\":\"Google\",\"role\":\"AI Engineer\"}}). "
+                "\"archieve Google application having AI Engineer role\" -> archive_application({\"target\":{\"company\":\"Google\",\"role\":\"AI Engineer\"}}). "
+                "\"remove Neilsoft from active list\" -> archive_application({\"target\":{\"company\":\"Neilsoft\"}}). "
+                "\"delete Google application for AI Engineer role\" -> explain_delete_policy({\"target\":{\"company\":\"Google\",\"role\":\"AI Engineer\"}}). "
+                "\"permanently delete Neilsoft AI Engineer\" -> explain_delete_policy({\"target\":{\"company\":\"Neilsoft\",\"role\":\"AI Engineer\"}})."
             ),
         },
         {
@@ -182,7 +196,9 @@ def build_field_extraction_messages(transcript: str, context: dict[str, object] 
                 "Do not rewrite free-form meaning. "
                 "Ignore conversational filler. "
                 "Company and field values may appear anywhere in natural language. "
-                "The role field is a free-form job title emitted as a single string (not an array). "
+                "The role field is free-form open-ended text emitted as a single string (not an array). "
+                "Any non-empty role title is valid: 'founding engineer', 'LLM Inference Optimization Engineer', 'Head of Product' are all valid. "
+                "Do not reject or omit a role because it is unfamiliar or not in any list. "
                 "Emit arrays for employment_types and current_stages. "
                 "Do not include filler or connector words inside extracted values. "
                 "Extract only information explicitly stated in the current utterance. "
@@ -270,6 +286,33 @@ def build_ollama_tools() -> list[dict[str, object]]:
                     "Good examples: missing company for a new draft, missing persisted-row target for an update, no active draft to save, or multiple existing matches."
                 ),
                 "parameters": AskClarificationArguments.model_json_schema(),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "archive_application",
+                "description": (
+                    "Use this when the user wants to archive, soft-delete, hide, or remove an application from the active list. "
+                    "Examples: 'archive Google AI Engineer application', 'archieve Google application having AI Engineer role' (minor typos are fine), "
+                    "'move Neilsoft AI Engineer to archive', 'hide this application', 'remove from active list'. "
+                    "Use target.company and target.role to identify which application to archive. "
+                    "Do NOT use this for permanent deletion — use explain_delete_policy for that."
+                ),
+                "parameters": ArchiveApplicationArguments.model_json_schema(),
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "explain_delete_policy",
+                "description": (
+                    "Use this when the user wants to permanently delete or destroy an application. "
+                    "Examples: 'delete Google AI Engineer application', 'permanently delete Neilsoft AI Engineer', 'remove it permanently'. "
+                    "This tool explains the delete policy (archive first, then use the archived view). "
+                    "It does NOT execute a permanent delete — that is UI-only."
+                ),
+                "parameters": ExplainDeletePolicyArguments.model_json_schema(),
             },
         },
     ]

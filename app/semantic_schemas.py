@@ -124,12 +124,26 @@ class AskClarificationArguments(BaseModel):
         return stripped
 
 
+class ArchiveApplicationArguments(BaseModel):
+    target: PreviewExistingApplicationTarget = Field(default_factory=PreviewExistingApplicationTarget)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class ExplainDeletePolicyArguments(BaseModel):
+    target: PreviewExistingApplicationTarget = Field(default_factory=PreviewExistingApplicationTarget)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 SemanticToolName = Literal[
     "patch_active_draft",
     "preview_existing_application_update",
     "request_draft_save",
     "attach_latest_browser_context",
     "ask_clarification",
+    "archive_application",
+    "explain_delete_policy",
 ]
 
 

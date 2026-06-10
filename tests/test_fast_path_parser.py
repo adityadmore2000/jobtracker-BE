@@ -76,13 +76,13 @@ def test_priority_high_no_context_returns_none():
 def test_onsite_produces_correct_location_mode():
     result = try_parse("onsite", {"draft_id": "1"})
     assert result is not None
-    assert result.changes.location_mode == "onsite"
+    assert result.changes.location_mode == "on-site"
 
 
 def test_on_site_variant_recognized():
     result = try_parse("on site", {"draft_id": "1"})
     assert result is not None
-    assert result.changes.location_mode == "onsite"
+    assert result.changes.location_mode == "on-site"
 
 
 def test_mark_applied_produces_status_applied():
