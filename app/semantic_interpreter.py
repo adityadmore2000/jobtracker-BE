@@ -11,6 +11,7 @@ from .semantic_schemas import (
     ArchiveApplicationArguments,
     AskClarificationArguments,
     AttachLatestBrowserContextArguments,
+    DiscardDraftArguments,
     ExplainDeletePolicyArguments,
     PatchActiveDraftArguments,
     PreviewExistingApplicationTarget,
@@ -42,6 +43,7 @@ TOOL_ARGUMENT_MODELS = {
     "ask_clarification": AskClarificationArguments,
     "archive_application": ArchiveApplicationArguments,
     "explain_delete_policy": ExplainDeletePolicyArguments,
+    "discard_draft": DiscardDraftArguments,
 }
 
 
@@ -159,7 +161,16 @@ def build_ollama_messages(transcript: str, context: dict[str, object] | None) ->
                 "\"archieve Google application having AI Engineer role\" -> archive_application({\"target\":{\"company\":\"Google\",\"role\":\"AI Engineer\"}}). "
                 "\"remove Neilsoft from active list\" -> archive_application({\"target\":{\"company\":\"Neilsoft\"}}). "
                 "\"delete Google application for AI Engineer role\" -> explain_delete_policy({\"target\":{\"company\":\"Google\",\"role\":\"AI Engineer\"}}). "
-                "\"permanently delete Neilsoft AI Engineer\" -> explain_delete_policy({\"target\":{\"company\":\"Neilsoft\",\"role\":\"AI Engineer\"}})."
+                "\"permanently delete Neilsoft AI Engineer\" -> explain_delete_policy({\"target\":{\"company\":\"Neilsoft\",\"role\":\"AI Engineer\"}}). "
+                "\"discard draft\" -> discard_draft({\"target\":{}}). "
+                "\"discard draft of Aiden AI for founding engineer role\" -> discard_draft({\"target\":{\"company\":\"Aiden AI\",\"role\":\"founding engineer\"}}). "
+                "\"cancel the Aiden AI draft\" -> discard_draft({\"target\":{\"company\":\"Aiden AI\"}}). "
+                "\"discard draft fro Aiden AI\" -> discard_draft({\"target\":{\"company\":\"Aiden AI\"}}). "
+                "\"remove this draft\" -> discard_draft({\"target\":{}}). "
+                "\"drop the draft\" -> discard_draft({\"target\":{}}). "
+                "Do not select patch_active_draft for lifecycle commands such as discard, save, archive, restore, or delete. "
+                "When the user explicitly names a field such as status, priority, or location, place the value in that field rather than role. "
+                "Example: 'update status of google application to in-touch' -> preview_existing_application_update with fields.status='in_touch', NOT role='in-touch'."
             ),
         },
         {
@@ -210,7 +221,10 @@ def build_field_extraction_messages(transcript: str, context: dict[str, object] 
                 "\"Set priority high and current stages Applied and Engaged\" -> "
                 "{\"priority\":\"high\",\"current_stages\":[\"Applied\",\"Engaged\"]}. "
                 "\"Add a note saying I previously worked here\" -> "
-                "{\"comments\":\"I previously worked here\"}."
+                "{\"comments\":\"I previously worked here\"}. "
+                "When the transcript explicitly names a field such as 'status', 'priority', or 'location', extract the value into that exact field, not into role. "
+                "Example: 'update status to in-touch' -> {\"status\":\"in-touch\"}, NOT {\"role\":\"in-touch\"}. "
+                "Example: 'set location to onsite' -> {\"location\":\"onsite\"}, NOT {\"role\":\"onsite\"}."
             ),
         },
         {
@@ -315,6 +329,21 @@ def build_ollama_tools() -> list[dict[str, object]]:
                 "parameters": ExplainDeletePolicyArguments.model_json_schema(),
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "discard_draft",
+                "description": (
+                    "Use when the user wants to discard, cancel, remove, or drop the active draft. "
+                    "Company and role references in the transcript identify the target draft and must NOT be treated as patch fields. "
+                    "Examples: 'discard draft', 'discard draft of Aiden AI for founding engineer role', "
+                    "'cancel the Aiden AI draft', 'remove this draft', 'drop the draft', 'discard draft fro Aiden AI'. "
+                    "Minor typos like 'fro' instead of 'for' are fine. "
+                    "Do NOT use patch_active_draft for discard commands."
+                ),
+                "parameters": DiscardDraftArguments.model_json_schema(),
+            },
+        },
     ]
 
 
@@ -363,6 +392,46 @@ def _extract_tool_call(payload: dict[str, object]) -> SemanticToolCallProposal:
 
     arguments = _parse_tool_arguments(function_payload.get("arguments", {}))
     return SemanticToolCallProposal(tool_name=name, arguments=arguments)
+
+
+def _sanitize_extracted_fields_dict(raw: dict[str, object]) -> dict[str, object]:
+    """Drop blank/whitespace-only optional strings and blank entries in optional string arrays.
+
+    The LLM sometimes emits empty strings for fields it cannot fill, e.g. comments="".
+    Pydantic's extra="forbid" schema rejects unknown keys but would also reject a blank
+    value for a field that requires non-empty text.  This sanitizer converts those to None
+    (which Pydantic treats as absent) before validation so a stray blank string never
+    causes the entire payload to be rejected.
+    """
+    optional_scalar_fields = {
+        "company", "role", "job_link", "location", "status",
+        "priority", "next_action", "comments",
+    }
+    optional_list_fields = {"employment_types", "current_stages"}
+    result: dict[str, object] = {}
+    for key, value in raw.items():
+        if key in optional_scalar_fields:
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped:
+                    result[key] = stripped
+                # else: drop — blank string treated as absent
+            elif value is not None:
+                result[key] = value
+            # None: also drop (exclude_none behaviour)
+        elif key in optional_list_fields:
+            if isinstance(value, list):
+                cleaned = [item for item in value if isinstance(item, str) and item.strip()]
+                if cleaned:
+                    result[key] = cleaned
+                # else: drop empty list
+            elif value is not None:
+                result[key] = value
+        else:
+            # engaged_days (int) and any future fields pass through as-is
+            if value is not None:
+                result[key] = value
+    return result
 
 
 def _extract_json_message_content(payload: dict[str, object]) -> dict[str, object]:
@@ -486,7 +555,7 @@ class OllamaSemanticInterpreter:
                 response_format=SemanticExtractedFields.model_json_schema(),
             )
             try:
-                extracted_fields = SemanticExtractedFields.model_validate(_extract_json_message_content(payload))
+                extracted_fields = SemanticExtractedFields.model_validate(_sanitize_extracted_fields_dict(_extract_json_message_content(payload)))
             except (ValidationError, SemanticInterpreterInvalidResponseError) as exc:
                 last_error = exc
                 attempts += 1

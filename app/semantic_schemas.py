@@ -46,10 +46,8 @@ class SemanticFieldPatch(BaseModel):
 
     @field_validator("next_action", "comments")
     @classmethod
-    def normalize_required_optional_text_fields(cls, value: str | None, info) -> str | None:
-        if value is None:
-            return value
-        return normalize_required_text(value, info.field_name)
+    def normalize_required_optional_text_fields(cls, value: str | None) -> str | None:
+        return normalize_optional_text(value)
 
     @field_validator("employment_types", "current_stages")
     @classmethod
@@ -136,6 +134,12 @@ class ExplainDeletePolicyArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class DiscardDraftArguments(BaseModel):
+    target: PreviewExistingApplicationTarget = Field(default_factory=PreviewExistingApplicationTarget)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 SemanticToolName = Literal[
     "patch_active_draft",
     "preview_existing_application_update",
@@ -144,6 +148,7 @@ SemanticToolName = Literal[
     "ask_clarification",
     "archive_application",
     "explain_delete_policy",
+    "discard_draft",
 ]
 
 

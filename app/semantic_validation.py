@@ -1,4 +1,5 @@
 import logging
+import re
 
 from sqlalchemy.orm import Session
 from pydantic import ValidationError
@@ -27,6 +28,7 @@ from .semantic_interpreter import (
 from .semantic_schemas import (
     ArchiveApplicationArguments,
     AskClarificationArguments,
+    DiscardDraftArguments,
     ExplainDeletePolicyArguments,
     PatchActiveDraftArguments,
     PreviewExistingApplicationTarget,
@@ -371,9 +373,103 @@ def _reconcile_controlled_field_misclassification(fields: SemanticFieldPatch) ->
     return result
 
 
-def normalize_extracted_fields(fields: SemanticExtractedFields) -> tuple[SemanticFieldPatch | None, list[str]]:
+_FIELD_CUE_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'\bstatus\b', re.IGNORECASE), "status"),
+    (re.compile(r'\bpriority\b', re.IGNORECASE), "priority"),
+    (re.compile(r'\blocation\b', re.IGNORECASE), "location"),
+    (re.compile(r'\bemployment\s+type\b|\bfull\s+time\b|\bpart\s+time\b|\binternship\b', re.IGNORECASE), "employment_types"),
+    (re.compile(r'\bcurrent\s+stage\b|\bstage\b', re.IGNORECASE), "current_stages"),
+    (re.compile(r'\brole\b', re.IGNORECASE), "role"),
+    (re.compile(r'\bcompany\b', re.IGNORECASE), "company"),
+    (re.compile(r'\bnext\s+action\b', re.IGNORECASE), "next_action"),
+    (re.compile(r'\bcomments?\b|\bnotes?\b', re.IGNORECASE), "comments"),
+]
+
+
+def detect_explicit_field_cues(transcript: str) -> set[str]:
+    """Return the set of field names explicitly cued by keyword in the transcript."""
+    cues: set[str] = set()
+    for pattern, field_name in _FIELD_CUE_PATTERNS:
+        if pattern.search(transcript):
+            cues.add(field_name)
+    return cues
+
+
+def reconcile_wrong_field_placement(transcript: str, fields: SemanticFieldPatch) -> SemanticFieldPatch:
+    """Use explicit field cues from transcript to repair wrong-field LLM extractions.
+
+    If the transcript says 'status' and the extracted role value normalizes as a valid
+    status value, and no status is already set, move it from role to status.
+
+    Only moves when:
+    1. Transcript explicitly names the destination field
+    2. Source field's value normalizes validly for the destination field
+    3. Destination field is unset
+    4. Move is unambiguous (source has only that value)
+    """
+    cues = detect_explicit_field_cues(transcript)
+    result = fields
+
+    # Rule: if "status" is cued and role contains a status-like value
+    if "status" in cues and result.role is not None and result.status is None:
+        candidate = result.role
+        canonical_status = normalize_status_value(candidate) or normalize_status_value(_normalize_lookup_text(candidate))
+        if canonical_status is not None:
+            logger.info(
+                "semantic_wrong_field_reconciliation source=role dest=status candidate=%r canonical=%r",
+                candidate,
+                canonical_status,
+            )
+            result = result.model_copy(update={"role": None, "status": canonical_status})
+
+    # Rule: if "priority" is cued and role contains a priority-like value
+    if "priority" in cues and result.role is not None and result.priority is None:
+        candidate = result.role
+        canonical_priority = normalize_priority(candidate)
+        if canonical_priority is not None:
+            logger.info(
+                "semantic_wrong_field_reconciliation source=role dest=priority candidate=%r canonical=%r",
+                candidate,
+                canonical_priority,
+            )
+            result = result.model_copy(update={"role": None, "priority": canonical_priority})
+
+    # Rule: if "location" is cued and role contains a location-like value
+    if "location" in cues and result.role is not None and result.location is None:
+        candidate = result.role
+        canonical_location = normalize_location(candidate)
+        if canonical_location is not None:
+            logger.info(
+                "semantic_wrong_field_reconciliation source=role dest=location candidate=%r canonical=%r",
+                candidate,
+                canonical_location,
+            )
+            result = result.model_copy(update={"role": None, "location": canonical_location})
+
+    # Rule: if "location" is cued and status contains a location-like value
+    if "location" in cues and result.status is not None and result.location is None:
+        candidate = result.status
+        canonical_location = normalize_location(candidate)
+        if canonical_location is not None:
+            logger.info(
+                "semantic_wrong_field_reconciliation source=status dest=location candidate=%r canonical=%r",
+                candidate,
+                canonical_location,
+            )
+            result = result.model_copy(update={"status": None, "location": canonical_location})
+
+    return result
+
+
+def normalize_extracted_fields(
+    fields: SemanticExtractedFields,
+    *,
+    transcript: str | None = None,
+) -> tuple[SemanticFieldPatch | None, list[str]]:
     patch = SemanticFieldPatch.model_validate(fields.model_dump(exclude_none=True))
     reconciled = _reconcile_controlled_field_misclassification(patch)
+    if transcript is not None:
+        reconciled = reconcile_wrong_field_placement(transcript, reconciled)
     return validate_fields(reconciled, tool_name="semantic_field_extraction")
 
 
@@ -1086,6 +1182,77 @@ def handle_explain_delete_policy(
     )
 
 
+def handle_discard_draft(
+    db: Session,
+    payload: TranscriptParseRequest,
+    proposal: SemanticToolCallProposal,
+    arguments: DiscardDraftArguments,
+    metrics,
+) -> SemanticTranscriptResponse:
+    context = build_context_payload(payload)
+    draft_id_raw = context.get("draft_id")
+
+    if draft_id_raw is None:
+        return SemanticTranscriptResponse(
+            status="unsupported",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=["No active draft to discard."],
+            interpreter_metrics=metrics,
+        )
+
+    draft_id = str(draft_id_raw)
+
+    # If target hints are provided, validate they match the active draft
+    if arguments.target.company or arguments.target.role:
+        active_draft = context.get("active_draft")
+        if isinstance(active_draft, dict):
+            draft_company = (active_draft.get("company") or "").strip().casefold()
+            draft_role = (active_draft.get("role") or "").strip().casefold()
+            target_company = (arguments.target.company or "").strip().casefold()
+            target_role = (arguments.target.role or "").strip().casefold()
+
+            company_matches = (
+                not target_company
+                or draft_company == target_company
+                or target_company in draft_company
+                or draft_company in target_company
+            )
+            role_matches = (
+                not target_role
+                or draft_role == target_role
+                or target_role in draft_role
+                or draft_role in target_role
+            )
+
+            if not (company_matches and role_matches):
+                active_company_label = active_draft.get("company") or "unknown"
+                active_role_label = active_draft.get("role") or "unknown"
+                return SemanticTranscriptResponse(
+                    status="clarification_required",
+                    operation="none",
+                    raw_transcript=payload.transcript,
+                    proposal=proposal,
+                    warnings=["Target hints do not match the active draft."],
+                    clarification_question=(
+                        f"The active draft is for {active_company_label} — {active_role_label}. "
+                        "Did you mean to discard that?"
+                    ),
+                    interpreter_metrics=metrics,
+                )
+
+    mutation_payload = MutationPayload(
+        operation="discard_draft",
+        target=MutationTarget(draft_id=draft_id),
+        changes=ApplicationChanges(),
+    )
+    mutation_result = dispatch(mutation_payload, db)
+    return build_transcript_response_from_mutation(
+        mutation_result, payload, proposal, metrics=metrics, warnings=[]
+    )
+
+
 def _proposal_with_clarification(question: str) -> SemanticToolCallProposal:
     return SemanticToolCallProposal(tool_name="ask_clarification", arguments={"question": question})
 
@@ -1435,6 +1602,8 @@ def validate_tool_arguments_with_safe_normalization(proposal: SemanticToolCallPr
         return normalized_proposal, ArchiveApplicationArguments.model_validate(normalized_proposal.arguments)
     if normalized_proposal.tool_name == "explain_delete_policy":
         return normalized_proposal, ExplainDeletePolicyArguments.model_validate(normalized_proposal.arguments)
+    if normalized_proposal.tool_name == "discard_draft":
+        return normalized_proposal, DiscardDraftArguments.model_validate(normalized_proposal.arguments)
     return normalized_proposal, None
 
 
@@ -1535,7 +1704,9 @@ def interpret_transcript_command(
     except SemanticInterpreterInvalidResponseError as exc:
         return unsupported_response(payload, [str(exc)])
 
-    extracted_fields, extraction_warnings = normalize_extracted_fields(interpretation.extracted_fields)
+    extracted_fields, extraction_warnings = normalize_extracted_fields(
+        interpretation.extracted_fields, transcript=payload.transcript
+    )
     if extracted_fields is None:
         logger.warning(
             "semantic_field_extraction_failure reason=%r fields=%r",
@@ -1578,7 +1749,9 @@ def interpret_transcript_command(
         except (SemanticInterpreterUnavailableError, SemanticInterpreterInvalidResponseError):
             retry_interpretation = None
         if retry_interpretation is not None:
-            retry_extracted_fields, retry_extraction_warnings = normalize_extracted_fields(retry_interpretation.extracted_fields)
+            retry_extracted_fields, retry_extraction_warnings = normalize_extracted_fields(
+                retry_interpretation.extracted_fields, transcript=payload.transcript
+            )
             if retry_extracted_fields is None:
                 return unsupported_response(payload, retry_extraction_warnings, metrics=retry_interpretation.metrics)
             merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
@@ -1626,7 +1799,9 @@ def interpret_transcript_command(
                     retry_interpretation.proposal.tool_name,
                     retry_interpretation.proposal.arguments,
                 )
-                retry_extracted_fields, retry_extraction_warnings = normalize_extracted_fields(retry_interpretation.extracted_fields)
+                retry_extracted_fields, retry_extraction_warnings = normalize_extracted_fields(
+                    retry_interpretation.extracted_fields, transcript=payload.transcript
+                )
                 if retry_extracted_fields is None:
                     return unsupported_response(payload, retry_extraction_warnings, metrics=retry_interpretation.metrics)
                 merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
@@ -1681,6 +1856,9 @@ def interpret_transcript_command(
     if proposal.tool_name == "explain_delete_policy":
         arguments = validated_arguments
         return handle_explain_delete_policy(db, payload, proposal, arguments, metrics)
+    if proposal.tool_name == "discard_draft":
+        arguments = validated_arguments
+        return handle_discard_draft(db, payload, proposal, arguments, metrics)
 
     return SemanticTranscriptResponse(
         status="unsupported",

@@ -112,6 +112,7 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
         "ask_clarification",
         "archive_application",
         "explain_delete_policy",
+        "discard_draft",
     }
     assert "format" not in selection_call["json"]
 
