@@ -33,6 +33,7 @@ from .models import ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent
 from .mutation_dispatcher import dispatch
 from .mutation_schemas import MutationPayload, MutationTarget, ApplicationChanges
 from .public_schemas import PublicApplicationDTO, PublicTranscriptResponse
+from .role_resolution import normalize_role_name
 from .transcript_response_adapter import to_public_application, to_public_transcript_response
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
@@ -98,6 +99,7 @@ def create_job_application(db: Session, payload: JobApplicationCreate) -> JobApp
     application = JobApplication(
         company_id=company_obj.id,
         role=payload.role,
+        normalized_role=normalize_role_name(payload.role),
         employment_types_json=list(payload.employment_types_json),
         job_link=payload.job_link,
         location=payload.location,
@@ -456,14 +458,45 @@ async def update_application(
 
     update_data = payload.model_dump(exclude_unset=True)
 
+    new_company_id = application.company_id
+    new_normalized_role = application.normalized_role
+
     # Company change must go through get_or_create_company
     if "company" in update_data:
         new_company_name = update_data.pop("company")
         company_obj = get_or_create_company(db, new_company_name)
-        application.company_id = company_obj.id
+        new_company_id = company_obj.id
+
+    if "role" in update_data:
+        new_normalized_role = normalize_role_name(update_data["role"])
+
+    # Enforce uniqueness if company or role is changing
+    if "role" in update_data or new_company_id != application.company_id:
+        collision = (
+            db.query(JobApplication)
+            .filter(
+                JobApplication.company_id == new_company_id,
+                JobApplication.normalized_role == new_normalized_role,
+                JobApplication.id != application.id,
+            )
+            .first()
+        )
+        if collision is not None:
+            cname = collision.company_rel.name if collision.company_rel else str(new_company_id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"An application for {cname} — {collision.role} already exists.",
+            )
+
+    if new_company_id != application.company_id:
+        application.company_id = new_company_id
 
     for field, value in update_data.items():
         setattr(application, field, value)
+
+    # Keep normalized_role in sync when role changes
+    if "role" in update_data:
+        application.normalized_role = new_normalized_role
 
     db.commit()
     db.refresh(application)

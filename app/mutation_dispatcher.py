@@ -14,6 +14,7 @@ from .constants import (
     normalize_status_value,
 )
 from .models import ApplicationEvent, ApplicationNote, JobApplication
+from .role_resolution import find_application_by_company_role, normalize_role_name
 from .mutation_schemas import (
     ALLOWED_OPERATIONS,
     ApplicationChanges,
@@ -85,6 +86,7 @@ def _application_to_dict(app: JobApplication) -> dict:
         "comments": app.comments,
         "is_draft": app.is_draft,
         "draft_created_at": app.draft_created_at.isoformat() if app.draft_created_at else None,
+        "archived_at": app.archived_at.isoformat() if app.archived_at else None,
         "created_at": app.created_at.isoformat() if app.created_at else None,
         "updated_at": app.updated_at.isoformat() if app.updated_at else None,
     }
@@ -104,6 +106,7 @@ def _apply_changes_to_application(app: JobApplication, changes: ApplicationChang
         app.company_id = company_obj.id
     if changes.role is not None:
         app.role = changes.role
+        app.normalized_role = normalize_role_name(changes.role)
     if changes.status is not None:
         app.status = changes.status
     if changes.priority is not None:
@@ -150,13 +153,24 @@ def handle_create_draft(payload: MutationPayload, db: Session) -> MutationResult
         return enum_error
 
     company_obj = get_or_create_company(db, payload.changes.company)
+    incoming_role = payload.changes.role or ""
+    incoming_status = payload.changes.status or ""
+
+    # --- Uniqueness check: look for any existing row for this company + role ---
+    existing = find_application_by_company_role(db, company_id=company_obj.id, role=incoming_role)
+    if existing is not None:
+        return _handle_reapply(existing, incoming_status, "create_draft", db)
+
+    # No existing row — create a fresh draft.
+    role_normalized = normalize_role_name(incoming_role)
     app = JobApplication(
         company_id=company_obj.id,
-        role=payload.changes.role or "",
+        role=incoming_role,
+        normalized_role=role_normalized,
         employment_types_json=list(payload.changes.employment_types) if payload.changes.employment_types else [],
         job_link=payload.changes.job_link or "",
         location=payload.changes.location_mode or "",
-        status=payload.changes.status or "",
+        status=incoming_status,
         current_stages_json=list(payload.changes.current_stages) if payload.changes.current_stages else [],
         priority=payload.changes.priority or "",
         engaged_days=0,
@@ -174,6 +188,73 @@ def handle_create_draft(payload: MutationPayload, db: Session) -> MutationResult
         operation="create_draft",
         message="Draft created.",
         draft=_application_to_dict(app),
+    )
+
+
+def _handle_reapply(existing: JobApplication, requested_status: str, operation: str, db: Session) -> MutationResult:
+    """Apply reapply semantics when an existing company+role row is found.
+
+    Reapply matrix:
+      - existing is a draft          → return existing draft, no duplicate
+      - already applied              → no-op, return truthful message
+      - accepted                     → clarification required (don't downgrade silently)
+      - rejected / in_touch / empty  → set status=applied, restore if archived
+    """
+    if existing.is_draft:
+        db.refresh(existing)
+        return MutationResult(
+            success=True,
+            operation="draft_updated",
+            message="An existing draft for this company and role already exists.",
+            draft=_application_to_dict(existing),
+        )
+
+    # Saved row (may be archived).
+    current_status = existing.status
+
+    if current_status == "accepted":
+        return MutationResult(
+            success=True,
+            operation="ask_clarification",
+            message="Clarification required.",
+            clarification_question=(
+                f"This application is currently marked as accepted. "
+                f"Do you want to change it to applied?"
+            ),
+        )
+
+    if current_status == "applied" and existing.archived_at is None:
+        return MutationResult(
+            success=True,
+            operation="no_change",
+            message="Application already exists and is marked as applied.",
+            application=_application_to_dict(existing),
+        )
+
+    # For all other states (rejected, in_touch, empty) — or archived — reapply.
+    was_archived = existing.archived_at is not None
+    old_status = existing.status
+    existing.status = "applied"
+    existing.archived_at = None
+    existing.updated_at = datetime.now(timezone.utc)
+
+    if was_archived:
+        _append_event(existing.id, "application_restored", {}, db)
+        _append_event(existing.id, "status_changed", {"field": "status", "from": old_status, "to": "applied"}, db)
+        message = "Existing archived application restored and marked as applied."
+    elif old_status != "applied":
+        _append_event(existing.id, "status_changed", {"field": "status", "from": old_status, "to": "applied"}, db)
+        message = f"Existing application reused and status updated to applied (was {old_status!r})."
+    else:
+        message = "Application already exists and is marked as applied."
+
+    db.commit()
+    db.refresh(existing)
+    return MutationResult(
+        success=True,
+        operation="updated",
+        message=message,
+        application=_application_to_dict(existing),
     )
 
 
@@ -223,6 +304,33 @@ def handle_save_draft(payload: MutationPayload, db: Session) -> MutationResult:
             return _error("save_draft", f"Draft with id {draft_id} not found")
         if not app.company:
             return _error("save_draft", "Draft must have company to be saved.")
+
+        # Enforce uniqueness: check for a saved row with same company + normalized_role.
+        collision = (
+            db.query(JobApplication)
+            .filter(
+                JobApplication.company_id == app.company_id,
+                JobApplication.normalized_role == app.normalized_role,
+                JobApplication.is_draft == False,  # noqa: E712
+                JobApplication.id != app.id,
+            )
+            .first()
+        )
+        if collision is not None:
+            # Safe merge: discard this draft, return the existing canonical row.
+            db.delete(app)
+            db.commit()
+            db.refresh(collision)
+            return MutationResult(
+                success=True,
+                operation="save_draft",
+                message=(
+                    f"An application for {collision.company} — {collision.role} already exists. "
+                    f"Draft discarded; existing application returned."
+                ),
+                application=_application_to_dict(collision),
+            )
+
         app.is_draft = False
         app.draft_created_at = None
         _append_event(app.id, "application_saved", {}, db)
@@ -291,6 +399,32 @@ def handle_patch_application(payload: MutationPayload, db: Session) -> MutationR
     old_role = app.role
     old_employment_types = list(app.employment_types_json)
     old_current_stages = list(app.current_stages_json)
+
+    # Pre-compute what the new company_id and normalized_role will be after changes.
+    new_company_id = app.company_id
+    if payload.changes.company is not None:
+        new_company_obj = get_or_create_company(db, payload.changes.company)
+        new_company_id = new_company_obj.id
+    new_normalized_role = normalize_role_name(payload.changes.role) if payload.changes.role is not None else app.normalized_role
+
+    # Check for collision with a different existing row only when company or role changes.
+    company_or_role_changing = payload.changes.company is not None or payload.changes.role is not None
+    if company_or_role_changing:
+        collision = (
+            db.query(JobApplication)
+            .filter(
+                JobApplication.company_id == new_company_id,
+                JobApplication.normalized_role == new_normalized_role,
+                JobApplication.id != app.id,
+            )
+            .first()
+        )
+        if collision is not None:
+            collision_company = collision.company_rel.name if collision.company_rel else str(new_company_id)
+            return _error(
+                "patch_application",
+                f"An application for {collision_company} — {collision.role} already exists.",
+            )
 
     _apply_changes_to_application(app, payload.changes, db)
 

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -28,10 +28,14 @@ class Company(Base):
 
 class JobApplication(Base):
     __tablename__ = "job_applications"
+    __table_args__ = (
+        UniqueConstraint("company_id", "normalized_role", name="uq_job_applications_company_role"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     company_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("companies.id"), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String, nullable=False, default="")
+    normalized_role: Mapped[str] = mapped_column(Text, nullable=False, default="")
     employment_types_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     job_link: Mapped[str] = mapped_column(String, nullable=False, default="")
     location: Mapped[str] = mapped_column(String, nullable=False, default="")

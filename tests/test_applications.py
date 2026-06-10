@@ -2697,7 +2697,7 @@ async def test_hotword_list_returns_canonical_name_and_excludes_aliases(client):
         {
             "company": "crew   trim   labs",
             "confirmed_company_name": "Krutrim Labs",
-            "role": "AI Engineer",
+            "role": "ML Engineer",
             "employment_types_json": ["Internship"],
             "job_link": "",
             "location": "",
@@ -2707,7 +2707,7 @@ async def test_hotword_list_returns_canonical_name_and_excludes_aliases(client):
             "engaged_days": 0,
             "next_action": "",
             "comments": "",
-            "raw_transcript": "Add crew trim labs for an AI Engineer role.",
+            "raw_transcript": "Add crew trim labs for an ML Engineer role.",
             "original_extracted_company_name": "crew   trim   labs",
         },
     )
@@ -2810,7 +2810,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
         {
             "company": "Krutrim Labs",
             "confirmed_company_name": "Krutrim Labs!",
-            "role": "AI Engineer",
+            "role": "ML Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2820,7 +2820,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
             "engaged_days": 0,
             "next_action": "",
             "comments": "",
-            "raw_transcript": "Add Krutrim Labs for an AI Engineer role.",
+            "raw_transcript": "Add Krutrim Labs for an ML Engineer role.",
             "original_extracted_company_name": "Krutrim Labs",
         },
     )
@@ -2830,7 +2830,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "role": "AI Engineer",
+            "role": "Platform Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2840,7 +2840,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
             "engaged_days": 0,
             "next_action": "",
             "comments": "",
-            "raw_transcript": "Add Crew Trim Labs for an AI Engineer role.",
+            "raw_transcript": "Add Crew Trim Labs for a Platform Engineer role.",
             "original_extracted_company_name": "Crew Trim Labs",
         },
     )
@@ -2850,7 +2850,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
         {
             "company": "crew   trim   labs",
             "confirmed_company_name": "Krutrim Labs",
-            "role": "AI Engineer",
+            "role": "Data Science",
             "employment_types_json": ["Internship"],
             "job_link": "",
             "location": "",
@@ -2860,7 +2860,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
             "engaged_days": 0,
             "next_action": "",
             "comments": "",
-            "raw_transcript": "Add crew trim labs for an AI Engineer role.",
+            "raw_transcript": "Add crew trim labs for a Data Science role.",
             "original_extracted_company_name": "crew   trim   labs",
         },
     )
