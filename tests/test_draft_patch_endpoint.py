@@ -25,11 +25,11 @@ def db():
         yield session
 
 
-def _create_draft(db, company: str = "PatchCo", roles: list[str] | None = None) -> int:
+def _create_draft(db, company: str = "PatchCo", role: str | None = None) -> int:
     payload = MutationPayload(
         operation="create_draft",
         target=MutationTarget(),
-        changes=ApplicationChanges(company=company, roles=roles or ["AI Engineer"]),
+        changes=ApplicationChanges(company=company, role=role or "AI Engineer"),
     )
     result = dispatch(payload, db)
     assert result.success
@@ -61,20 +61,20 @@ async def test_patch_draft_persists_to_db(client, db):
 
 
 @pytest.mark.anyio
-async def test_patch_draft_multi_role_preserved(client, db):
+async def test_patch_draft_role_preserved(client, db):
     draft_id = _create_draft(db)
-    response = await client.patch(f"/drafts/{draft_id}", json={"roles": ["AI Engineer", "RAG Engineer"]})
+    response = await client.patch(f"/drafts/{draft_id}", json={"role": "RAG Engineer"})
     assert response.status_code == 200
     data = response.json()
-    assert data["roles"] == ["AI Engineer", "RAG Engineer"]
+    assert data["role"] == "RAG Engineer"
 
 
 @pytest.mark.anyio
 async def test_patch_draft_unknown_role_accepted(client, db):
     draft_id = _create_draft(db)
-    response = await client.patch(f"/drafts/{draft_id}", json={"roles": ["LLM Inference Optimization Engineer"]})
+    response = await client.patch(f"/drafts/{draft_id}", json={"role": "LLM Inference Optimization Engineer"})
     assert response.status_code == 200
-    assert response.json()["roles"] == ["LLM Inference Optimization Engineer"]
+    assert response.json()["role"] == "LLM Inference Optimization Engineer"
 
 
 @pytest.mark.anyio

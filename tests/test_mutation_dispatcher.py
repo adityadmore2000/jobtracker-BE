@@ -67,7 +67,7 @@ def test_dispatch_rejects_patch_application_without_application_id(db):
 
 
 def test_dispatch_create_draft_returns_preview(db):
-    payload = make_payload("create_draft", changes={"company": "Neilsoft", "roles": ["AI Engineer"]})
+    payload = make_payload("create_draft", changes={"company": "Neilsoft", "role": "AI Engineer"})
     result = dispatch(payload, db)
     assert result.success is True
     assert result.draft is not None
@@ -101,7 +101,7 @@ async def test_existing_transcript_parse_behavior_unchanged(client):
                     },
                 ),
                 metrics=SemanticInterpreterMetrics(latency_ms=10),
-                extracted_fields=SemanticExtractedFields(company="Neilsoft", roles=["AI Engineer"]),
+                extracted_fields=SemanticExtractedFields(company="Neilsoft", role="AI Engineer"),
             )
 
         def health_check(self):
@@ -122,24 +122,24 @@ async def test_existing_transcript_parse_behavior_unchanged(client):
     assert "draft" in body
     assert body["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert body["draft"]["company"] == "Neilsoft"
-    assert body["draft"]["roles"] == ["AI Engineer"]
+    assert body["draft"]["role"] == "AI Engineer"
 
 
 # ---------------------------------------------------------------------------
 # Multi-value field preservation
 # ---------------------------------------------------------------------------
 
-def test_create_draft_preserves_multiple_roles(db):
+def test_create_draft_persists_role(db):
     payload = make_payload("create_draft", changes={
         "company": "Acme",
-        "roles": ["AI Engineer", "RAG Engineer"],
+        "role": "AI Engineer",
     })
     result = dispatch(payload, db)
     assert result.success is True
-    assert result.draft["roles_json"] == ["AI Engineer", "RAG Engineer"]
+    assert result.draft["role"] == "AI Engineer"
 
     row = db.get(JobApplication, result.draft["id"])
-    assert row.roles_json == ["AI Engineer", "RAG Engineer"]
+    assert row.role == "AI Engineer"
 
 
 def test_patch_draft_preserves_multiple_employment_types(db):
@@ -157,7 +157,7 @@ def test_patch_draft_preserves_multiple_employment_types(db):
 
 
 def test_patch_application_preserves_multiple_current_stages(db):
-    create = dispatch(make_payload("create_draft", changes={"company": "Acme", "roles": ["AI Engineer"]}), db)
+    create = dispatch(make_payload("create_draft", changes={"company": "Acme", "role": "AI Engineer"}), db)
     save = dispatch(make_payload("save_draft", target={"draft_id": str(create.draft["id"])}), db)
     app_id = save.application["id"]
 
@@ -178,12 +178,12 @@ def test_patch_application_preserves_multiple_current_stages(db):
 def test_unknown_role_is_accepted_without_whitelist_rejection(db):
     payload = make_payload("create_draft", changes={
         "company": "DeepMind",
-        "roles": ["LLM Inference Optimization Engineer"],
+        "role": "LLM Inference Optimization Engineer",
     })
     result = dispatch(payload, db)
     assert result.success is True
     row = db.get(JobApplication, result.draft["id"])
-    assert row.roles_json == ["LLM Inference Optimization Engineer"]
+    assert row.role == "LLM Inference Optimization Engineer"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ def test_dispatch_rejects_unknown_status(db):
 # ---------------------------------------------------------------------------
 
 def test_save_draft_with_draft_id_saves_once_and_returns_application(db):
-    create = dispatch(make_payload("create_draft", changes={"company": "SaveCo", "roles": ["AI Engineer"]}), db)
+    create = dispatch(make_payload("create_draft", changes={"company": "SaveCo", "role": "AI Engineer"}), db)
     draft_id = str(create.draft["id"])
 
     save = dispatch(make_payload("save_draft", target={"draft_id": draft_id}), db)

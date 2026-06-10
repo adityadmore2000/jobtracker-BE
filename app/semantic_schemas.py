@@ -19,7 +19,7 @@ def normalize_required_text(value: str, field_name: str) -> str:
 
 class SemanticFieldPatch(BaseModel):
     company: str | None = None
-    roles: list[str] | None = None
+    role: str | None = None
     employment_types: list[str] | None = None
     job_link: str | None = None
     location: str | None = None
@@ -37,24 +37,19 @@ class SemanticFieldPatch(BaseModel):
     def normalize_text_fields(cls, value: str | None) -> str | None:
         return normalize_optional_text(value)
 
+    @field_validator("role")
+    @classmethod
+    def normalize_role(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return normalize_required_text(value, "role")
+
     @field_validator("next_action", "comments")
     @classmethod
     def normalize_required_optional_text_fields(cls, value: str | None, info) -> str | None:
         if value is None:
             return value
         return normalize_required_text(value, info.field_name)
-
-    @field_validator("roles")
-    @classmethod
-    def normalize_roles(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return value
-        normalized: list[str] = []
-        for item in value:
-            normalized_item = normalize_required_text(item, "roles")
-            if normalized_item not in normalized:
-                normalized.append(normalized_item)
-        return normalized
 
     @field_validator("employment_types", "current_stages")
     @classmethod

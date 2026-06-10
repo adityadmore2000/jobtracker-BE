@@ -57,14 +57,14 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
     def fake_post(url, json, timeout):
         captured.append({"url": url, "json": json, "timeout": timeout})
         if "tools" not in json:
-            return build_extraction_response({"company": "Neilsoft", "roles": ["AI Engineer"]})
+            return build_extraction_response({"company": "Neilsoft", "role": "AI Engineer"})
         return build_success_response(
             [
                 {
                     "function": {
                         "name": "patch_active_draft",
                         "arguments": {
-                            "fields": {"company": "Neilsoft", "roles": ["AI Engineer"]},
+                            "fields": {"company": "Neilsoft", "role": "AI Engineer"},
                             "replace_explicit_fields": True,
                             "context_notes": [],
                         },
@@ -82,7 +82,7 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
     )
 
     assert result.proposal.tool_name == "patch_active_draft"
-    assert result.extracted_fields.model_dump(exclude_none=True) == {"company": "Neilsoft", "roles": ["AI Engineer"]}
+    assert result.extracted_fields.model_dump(exclude_none=True) == {"company": "Neilsoft", "role": "AI Engineer"}
     assert len(captured) == 2
     extraction_call, selection_call = captured
     assert extraction_call["url"] == "http://127.0.0.1:11434/api/chat"
@@ -102,7 +102,7 @@ def test_ollama_request_uses_expected_endpoint_model_and_tools(monkeypatch: pyte
     assert "Which company's application do you mean?" in selection_call["json"]["messages"][0]["content"]
     assert "Do not ask \"Which company should I use?\" when exactly one explicit company is already present." in selection_call["json"]["messages"][0]["content"]
     assert '"explicit_known_companies_in_current_utterance": ["Neilsoft"]' in selection_call["json"]["messages"][1]["content"]
-    assert '"normalized_extracted_fields": {"company": "Neilsoft", "roles": ["AI Engineer"]}' in selection_call["json"]["messages"][1]["content"]
+    assert '"normalized_extracted_fields": {"company": "Neilsoft", "role": "AI Engineer"}' in selection_call["json"]["messages"][1]["content"]
     assert selection_call["json"]["tools"]
     assert {tool["function"]["name"] for tool in selection_call["json"]["tools"]} == {
         "patch_active_draft",
@@ -125,7 +125,7 @@ def test_build_ollama_messages_includes_retry_hint_and_explicit_companies() -> N
 
     assert len(messages) == 2
     assert messages[0]["role"] == "system"
-    assert "For list-valued fields such as roles, employment_types, and current_stages, always emit JSON arrays." in messages[0]["content"]
+    assert "For list-valued fields such as employment_types and current_stages, always emit JSON arrays." in messages[0]["content"]
     assert "Company and other fields may appear in any natural order." in messages[0]["content"]
     assert "Role at Neilsoft for AI Engineer" in messages[0]["content"]
     assert "Do not include connector words such as \"for\"" in messages[0]["content"]
@@ -148,7 +148,7 @@ def test_build_field_extraction_messages_include_examples_and_retry_hint() -> No
     assert len(messages) == 2
     assert "Do not select a tool." in messages[0]["content"]
     assert "Ignore conversational filler." in messages[0]["content"]
-    assert "Roles are free-form job titles." in messages[0]["content"]
+    assert "The role field is a free-form job title emitted as a single string (not an array)." in messages[0]["content"]
     assert "It's called Neilsoft. I'd like to track AI Engineer application for this position." in messages[0]["content"]
     assert '"explicit_known_companies_in_current_utterance": ["Neilsoft"]' in messages[1]["content"]
     assert '"field_extraction_retry_hint": "Return only valid JSON matching the extraction schema."' in messages[1]["content"]
@@ -170,14 +170,14 @@ def test_field_extraction_retries_once_when_first_json_is_invalid(monkeypatch: p
             json={"message": {"content": "not-json"}, "total_duration": 1},
             request=httpx.Request("POST", "http://127.0.0.1:11434/api/chat"),
         ),
-        build_extraction_response({"company": "Neilsoft", "roles": ["AI Engineer"]}),
+        build_extraction_response({"company": "Neilsoft", "role": "AI Engineer"}),
         build_success_response(
             [
                 {
                     "function": {
                         "name": "patch_active_draft",
                         "arguments": {
-                            "fields": {"company": "Neilsoft", "roles": ["AI Engineer"]},
+                            "fields": {"company": "Neilsoft", "role": "AI Engineer"},
                             "replace_explicit_fields": True,
                             "context_notes": [],
                         },
@@ -199,7 +199,7 @@ def test_field_extraction_retries_once_when_first_json_is_invalid(monkeypatch: p
         {"explicit_known_companies": ["Neilsoft"]},
     )
 
-    assert result.extracted_fields.model_dump(exclude_none=True) == {"company": "Neilsoft", "roles": ["AI Engineer"]}
+    assert result.extracted_fields.model_dump(exclude_none=True) == {"company": "Neilsoft", "role": "AI Engineer"}
     assert len(seen_payloads) == 3
     assert '"field_extraction_retry_hint": "Your previous field-extraction JSON was invalid. Return only valid JSON matching the extraction schema. Do not add fields that were not explicitly stated."' in seen_payloads[1]["messages"][1]["content"]
 

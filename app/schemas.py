@@ -33,18 +33,7 @@ def validate_optional_allowed(value: str, allowed: list[str], field_name: str) -
 
 def normalize_role_title(value: str) -> str:
     normalized = " ".join(value.strip().split())
-    if not normalized:
-        raise ValueError("roles_json must contain non-blank strings")
     return normalized
-
-
-def validate_role_titles(values: list[str], field_name: str) -> list[str]:
-    normalized_values = [normalize_role_title(value) for value in values]
-    deduplicated: list[str] = []
-    for value in normalized_values:
-        if value not in deduplicated:
-            deduplicated.append(value)
-    return deduplicated
 
 
 def normalize_string(value: Any) -> Any:
@@ -53,6 +42,7 @@ def normalize_string(value: Any) -> Any:
 
 class JobApplicationBase(BaseModel):
     company: str = Field(min_length=1)
+    role: str = ""
     roles_json: list[str] = Field(default_factory=list)
     employment_types_json: list[str] = Field(default_factory=list)
     job_link: str = ""
@@ -72,10 +62,15 @@ class JobApplicationBase(BaseModel):
             raise ValueError("company is required")
         return stripped
 
+    @field_validator("role")
+    @classmethod
+    def normalize_role_field(cls, value: str) -> str:
+        return " ".join(value.strip().split())
+
     @field_validator("roles_json")
     @classmethod
     def roles_are_titles(cls, values: list[str]) -> list[str]:
-        return validate_role_titles(values, "roles_json")
+        return [normalize_role_title(v) for v in values if v.strip()]
 
     @field_validator("employment_types_json")
     @classmethod
@@ -151,7 +146,7 @@ class ApplicationCompanyConfirmationRequest(ApplicationCreateCandidateRequest):
 
 class JobApplicationUpdate(BaseModel):
     company: str | None = Field(default=None, min_length=1)
-    roles_json: list[str] | None = None
+    role: str | None = None
     employment_types_json: list[str] | None = None
     job_link: str | None = None
     location: str | None = None
@@ -172,10 +167,12 @@ class JobApplicationUpdate(BaseModel):
             raise ValueError("company is required")
         return stripped
 
-    @field_validator("roles_json")
+    @field_validator("role")
     @classmethod
-    def roles_are_titles(cls, values: list[str] | None) -> list[str] | None:
-        return None if values is None else validate_role_titles(values, "roles_json")
+    def normalize_role_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return " ".join(value.strip().split())
 
     @field_validator("employment_types_json")
     @classmethod
@@ -332,9 +329,9 @@ class SemanticTranscriptResponse(BaseModel):
 
 
 class DraftPatchRequest(BaseModel):
-    """Public-facing draft patch payload — uses the same field names as PublicApplicationDTO."""
+    """Public-facing draft patch payload."""
     company: str | None = None
-    roles: list[str] | None = None
+    role: str | None = None
     employment_types: list[str] | None = None
     job_link: str | None = None
     location: str | None = None
@@ -355,10 +352,12 @@ class DraftPatchRequest(BaseModel):
             raise ValueError("company is required")
         return stripped
 
-    @field_validator("roles")
+    @field_validator("role")
     @classmethod
-    def roles_are_titles(cls, values: list[str] | None) -> list[str] | None:
-        return None if values is None else validate_role_titles(values, "roles")
+    def normalize_role_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return " ".join(value.strip().split())
 
     @field_validator("employment_types")
     @classmethod

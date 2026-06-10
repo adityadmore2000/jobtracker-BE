@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -10,17 +10,33 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class Company(Base):
+    __tablename__ = "companies"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
+    website: Mapped[str | None] = mapped_column(Text, nullable=True)
+    career_page: Mapped[str | None] = mapped_column(Text, nullable=True)
+    linkedin_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+
+    applications: Mapped[list["JobApplication"]] = relationship(back_populates="company_rel")
+
+
 class JobApplication(Base):
     __tablename__ = "job_applications"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    company: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    roles_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
-    employment_types_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    company_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("companies.id"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String, nullable=False, default="")
+    employment_types_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     job_link: Mapped[str] = mapped_column(String, nullable=False, default="")
     location: Mapped[str] = mapped_column(String, nullable=False, default="")
     status: Mapped[str] = mapped_column(String, nullable=False, default="")
-    current_stages_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    current_stages_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     priority: Mapped[str] = mapped_column(String, nullable=False, default="")
     engaged_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     next_action: Mapped[str] = mapped_column(String, nullable=False, default="")
@@ -31,11 +47,13 @@ class JobApplication(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
 
+    company_rel: Mapped["Company"] = relationship(back_populates="applications")
+
     correction_events: Mapped[list["AsrCompanyCorrectionEvent"]] = relationship(
         back_populates="application",
         passive_deletes=True,
     )
-    notes: Mapped[list["ApplicationNote"]] = relationship(
+    notes_rel: Mapped[list["ApplicationNote"]] = relationship(
         "ApplicationNote",
         order_by="ApplicationNote.created_at",
         cascade="all, delete-orphan",
@@ -45,6 +63,10 @@ class JobApplication(Base):
         order_by="ApplicationEvent.created_at",
         cascade="all, delete-orphan",
     )
+
+    @property
+    def company(self) -> str:
+        return self.company_rel.name if self.company_rel else ""
 
 
 class CanonicalCompany(Base):

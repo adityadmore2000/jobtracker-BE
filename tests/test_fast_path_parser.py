@@ -173,13 +173,13 @@ async def test_unrecognized_transcript_still_calls_ollama(client):
                 proposal=SemanticToolCallProposal(
                     tool_name="patch_active_draft",
                     arguments={
-                        "fields": {"company": "Neilsoft", "roles": ["AI Engineer"]},
+                        "fields": {"company": "Neilsoft", "role": "AI Engineer"},
                         "replace_explicit_fields": True,
                         "context_notes": [],
                     },
                 ),
                 metrics=SemanticInterpreterMetrics(latency_ms=10),
-                extracted_fields=SemanticExtractedFields(company="Neilsoft", roles=["AI Engineer"]),
+                extracted_fields=SemanticExtractedFields(company="Neilsoft", role="AI Engineer"),
             )
 
         def health_check(self):

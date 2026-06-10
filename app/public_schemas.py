@@ -9,7 +9,7 @@ from pydantic import BaseModel
 class PublicApplicationDTO(BaseModel):
     id: int
     company: str
-    roles: list[str]
+    role: str
     employment_types: list[str]
     job_link: str
     location: str

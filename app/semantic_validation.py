@@ -207,30 +207,11 @@ def _normalize_lookup_text(value: str) -> str:
     return " ".join(value.replace("-", " ").replace("_", " ").strip().casefold().split())
 
 
-def normalize_role_title(value: str) -> str:
-    return " ".join(value.strip().split())
-
-
-
-
-def normalize_roles(values: list[str] | None, *, tool_name: str | None = None) -> list[str] | None:
-    if values is None:
+def normalize_role_title(value: str | None) -> str | None:
+    if value is None:
         return None
-    normalized_values: list[str] = []
-    for value in values:
-        normalized_role_value = normalize_role_title(value)
-        if not normalized_role_value:
-            logger.warning(
-                "semantic_role_validation_failed tool=%s raw_role_value=%r normalized_role_value=%r reason=%r",
-                tool_name,
-                value,
-                normalized_role_value,
-                "blank_role_value",
-            )
-            return None
-        if normalized_role_value not in normalized_values:
-            normalized_values.append(normalized_role_value)
-    return normalized_values
+    normalized = " ".join(value.strip().split())
+    return normalized if normalized else None
 
 
 def normalize_employment_types(values: list[str] | None) -> list[str] | None:
@@ -277,9 +258,19 @@ def validate_fields(fields: SemanticFieldPatch, *, tool_name: str | None = None)
     warnings: list[str] = []
     errors: list[str] = []
 
-    roles = normalize_roles(fields.roles, tool_name=tool_name)
-    if fields.roles is not None and roles is None:
-        errors.append("Unsupported role value.")
+    role: str | None = None
+    if fields.role is not None:
+        normalized_role = normalize_role_title(fields.role)
+        if not normalized_role:
+            errors.append("Unsupported role value.")
+            logger.warning(
+                "semantic_role_validation_failed tool=%s raw_role_value=%r reason=%r",
+                tool_name,
+                fields.role,
+                "blank_role_value",
+            )
+        else:
+            role = normalized_role
 
     employment_types = normalize_employment_types(fields.employment_types)
     if fields.employment_types is not None and employment_types is None:
@@ -312,7 +303,7 @@ def validate_fields(fields: SemanticFieldPatch, *, tool_name: str | None = None)
     return (
         SemanticFieldPatch(
             company=fields.company,
-            roles=roles,
+            role=role,
             employment_types=employment_types,
             job_link=fields.job_link,
             location=location,
@@ -335,8 +326,8 @@ def normalize_extracted_fields(fields: SemanticExtractedFields) -> tuple[Semanti
 
 
 def describe_application(application: JobApplication) -> str:
-    if application.roles_json:
-        return ", ".join(application.roles_json)
+    if application.role:
+        return application.role
     return f"Application #{application.id}"
 
 
@@ -348,10 +339,13 @@ def filter_matches_by_role(matches: list[JobApplication], role: str | None) -> l
     if role is None:
         return matches
     normalized_requested_role = normalize_role_title(role)
+    if normalized_requested_role is None:
+        return matches
     return [
         application
         for application in matches
-        if any(normalize_role_title(existing_role).casefold() == normalized_requested_role.casefold() for existing_role in application.roles_json)
+        if normalize_role_title(application.role) is not None
+        and normalize_role_title(application.role).casefold() == normalized_requested_role.casefold()
     ]
 
 
@@ -369,10 +363,10 @@ def resolve_existing_application_target(
         application = db.get(JobApplication, target.application_id)
         if application is None:
             return None, ["Referenced application was not found."], None
-        if requested_role and not any(
-            normalize_role_title(existing_role).casefold() == requested_role.casefold() for existing_role in application.roles_json
-        ):
-            return None, ["Referenced application does not match the requested role."], None
+        if requested_role is not None:
+            existing_role = normalize_role_title(application.role)
+            if existing_role is None or existing_role.casefold() != requested_role.casefold():
+                return None, ["Referenced application does not match the requested role."], None
         return application, [], None
 
     requested_company = target.company
@@ -401,10 +395,17 @@ def build_draft_preview(
     active_draft = context.get("active_draft")
     used_context = active_draft is not None
 
+    # Resolve roles_json: use [fields.role] if role explicitly provided, else fall back to base_draft
+    if fields.role is not None:
+        roles_json = [fields.role]
+    else:
+        roles_json = list(base_draft.roles_json)
+
     try:
         draft = JobApplicationCreate(
             company=fields.company if fields.company is not None else base_draft.company,
-            roles_json=list(fields.roles) if fields.roles is not None else list(base_draft.roles_json),
+            role=roles_json[0] if roles_json else "",
+            roles_json=roles_json,
             employment_types_json=(
                 list(fields.employment_types) if fields.employment_types is not None else list(base_draft.employment_types_json)
             ),
@@ -435,13 +436,13 @@ def build_context_draft(context: dict[str, object]) -> JobApplicationCreate | No
         role_from_context = context.get("active_role")
         active_role = role_from_context if isinstance(role_from_context, str) else None
         company = active_company.strip() if isinstance(active_company, str) else ""
-        normalized_active_role = normalize_role_title(active_role) if active_role else None
-        roles = [normalized_active_role] if normalized_active_role else []
+        normalized_active_role = normalize_role_title(active_role)
+        roles_json = [normalized_active_role] if normalized_active_role else []
         if not company:
             return None
         return JobApplicationCreate(
             company=company,
-            roles_json=[role for role in roles if role],
+            roles_json=roles_json,
             employment_types_json=[],
             job_link="",
             location="",
@@ -454,11 +455,15 @@ def build_context_draft(context: dict[str, object]) -> JobApplicationCreate | No
         )
 
     company_value = active_draft.get("company")
-    roles_value = active_draft.get("roles")
+    role_value = active_draft.get("role")
     employment_types_value = active_draft.get("employment_types")
     current_stages_value = active_draft.get("current_stages")
 
-    roles = normalize_roles(roles_value if isinstance(roles_value, list) else None) or []
+    # role is scalar string; normalize it and wrap in list for roles_json
+    raw_role = role_value if isinstance(role_value, str) else None
+    normalized_role = normalize_role_title(raw_role)
+    roles_json = [normalized_role] if normalized_role else []
+
     employment_types = normalize_employment_types(employment_types_value if isinstance(employment_types_value, list) else None) or []
     current_stages = normalize_stages(current_stages_value if isinstance(current_stages_value, list) else None) or []
     location = normalize_location(active_draft.get("location")) if isinstance(active_draft.get("location"), str) else None
@@ -472,7 +477,7 @@ def build_context_draft(context: dict[str, object]) -> JobApplicationCreate | No
 
     return JobApplicationCreate(
         company=company,
-        roles_json=roles,
+        roles_json=roles_json,
         employment_types_json=employment_types,
         job_link=active_draft.get("job_link") if isinstance(active_draft.get("job_link"), str) else "",
         location=location or "",
@@ -486,10 +491,17 @@ def build_context_draft(context: dict[str, object]) -> JobApplicationCreate | No
 
 
 def build_existing_application_preview(application: JobApplication, fields: SemanticFieldPatch) -> JobApplicationCreate | None:
+    # role is scalar on JobApplication; wrap in list for roles_json
+    if fields.role is not None:
+        roles_json = [fields.role]
+    else:
+        existing_role = application.role
+        roles_json = [existing_role] if existing_role else []
+
     try:
         return JobApplicationCreate(
             company=application.company,
-            roles_json=list(fields.roles) if fields.roles is not None else list(application.roles_json),
+            roles_json=roles_json,
             employment_types_json=(
                 list(fields.employment_types) if fields.employment_types is not None else list(application.employment_types_json)
             ),
@@ -511,7 +523,7 @@ def build_existing_application_preview(application: JobApplication, fields: Sema
 def fields_have_values(fields: SemanticFieldPatch, *, allow_company: bool) -> bool:
     values = {
         "company": fields.company,
-        "roles": fields.roles,
+        "role": fields.role,
         "employment_types": fields.employment_types,
         "job_link": fields.job_link,
         "location": fields.location,
@@ -613,12 +625,15 @@ def handle_patch_active_draft(
         operation = "create_draft"
         target = MutationTarget()
 
+    # roles_json is a list[str] in JobApplicationCreate; extract scalar role for ApplicationChanges
+    draft_role = draft.roles_json[0] if draft.roles_json else None
+
     mutation_payload = MutationPayload(
         operation=operation,
         target=target,
         changes=ApplicationChanges(
             company=draft.company,
-            roles=list(draft.roles_json) if draft.roles_json else None,
+            role=draft_role,
             status=draft.status or None,
             priority=draft.priority or None,
             location_mode=draft.location or None,
@@ -715,7 +730,7 @@ def handle_preview_existing_application_update(
             priority=validated_fields.priority or None,
             location_mode=validated_fields.location or None,
             job_link=validated_fields.job_link or None,
-            roles=list(validated_fields.roles) if validated_fields.roles else None,
+            role=validated_fields.role or None,
             employment_types=list(validated_fields.employment_types) if validated_fields.employment_types else None,
             current_stages=list(validated_fields.current_stages) if validated_fields.current_stages else None,
         ),
@@ -765,12 +780,16 @@ def handle_request_draft_save(
 
     draft_id = context.get("draft_id")
     draft_id_str = str(draft_id) if draft_id is not None else None
+
+    # roles_json is a list[str] in JobApplicationCreate; extract scalar role for ApplicationChanges
+    context_draft_role = context_draft.roles_json[0] if context_draft.roles_json else None
+
     mutation_payload = MutationPayload(
         operation="save_draft",
         target=MutationTarget(draft_id=draft_id_str),
         changes=ApplicationChanges(
             company=context_draft.company,
-            roles=list(context_draft.roles_json) if context_draft.roles_json else None,
+            role=context_draft_role,
         ),
     )
     if db is not None:
@@ -900,22 +919,16 @@ def _normalize_company_value(value: object) -> object:
     return stripped if stripped else _INVALID
 
 
-def _normalize_role_values(value: object) -> object:
+def _normalize_role_value(value: object) -> object:
+    """Normalize a scalar role string. Accepts str; rejects everything else."""
     if isinstance(value, str):
-        raw_values = [value]
-    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
-        raw_values = value
-    else:
-        return _INVALID
-
-    normalized_values: list[str] = []
-    for raw_value in raw_values:
-        normalized = normalize_role_title(raw_value)
-        if not normalized:
-            return _INVALID
-        if normalized not in normalized_values:
-            normalized_values.append(normalized)
-    return normalized_values
+        normalized = " ".join(value.strip().split())
+        return normalized if normalized else _INVALID
+    # Also accept a single-element list for backward compatibility with LLM output
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], str):
+        normalized = " ".join(value[0].strip().split())
+        return normalized if normalized else _INVALID
+    return _INVALID
 
 
 def _normalize_employment_type_values(value: object) -> object:
@@ -1022,8 +1035,8 @@ def _merge_field_aliases(
 def normalize_semantic_field_patch_argument_shape(fields: dict[str, object]) -> dict[str, object] | None:
     normalized_fields = dict(fields)
 
+    # List-valued fields that need alias merging
     alias_merge_specs = (
-        ("roles", ("role",), _normalize_role_values),
         ("employment_types", ("employment_type", "type"), _normalize_employment_type_values),
         ("current_stages", ("current_stage", "stage"), _normalize_stage_values),
     )
@@ -1032,8 +1045,28 @@ def normalize_semantic_field_patch_argument_shape(fields: dict[str, object]) -> 
         if merged is _INVALID or merged is _CONFLICT:
             return None
 
+    # Handle "roles" key from LLM output: collapse to scalar "role"
+    # LLMs trained on the old schema may still emit roles:[...] — accept a single-element array
+    if "roles" in normalized_fields and "role" not in normalized_fields:
+        roles_raw = normalized_fields.pop("roles")
+        normalized_role = _normalize_role_value(roles_raw)
+        if normalized_role is _INVALID:
+            return None
+        normalized_fields["role"] = normalized_role
+    elif "roles" in normalized_fields and "role" in normalized_fields:
+        # Both present — try to reconcile; if they conflict, reject
+        roles_raw = normalized_fields.pop("roles")
+        normalized_roles_as_role = _normalize_role_value(roles_raw)
+        normalized_role = _normalize_role_value(normalized_fields["role"])
+        if normalized_roles_as_role is _INVALID or normalized_role is _INVALID:
+            return None
+        if normalized_roles_as_role != normalized_role:
+            return None
+        normalized_fields["role"] = normalized_role
+
     scalar_normalizers = {
         "company": _normalize_company_value,
+        "role": _normalize_role_value,
         "status": _normalize_status_value,
         "priority": _normalize_priority_value,
         "location": _normalize_location_value,
@@ -1388,8 +1421,8 @@ def interpret_transcript_command(
             retry_context = context | {
                 "schema_repair_retry_hint": (
                     "Your previous tool arguments were invalid. Use the existing patch_active_draft schema. "
-                    "Put company in fields.company. Put one or more roles in fields.roles as a JSON array of strings. "
-                    "Do not use fields.role unless you are mirroring the same value into fields.roles."
+                    "Put company in fields.company. Put the role as a single string in fields.role. "
+                    "Do not use fields.roles — role is a scalar string, not an array."
                 ),
                 "normalized_extracted_fields": extracted_fields.model_dump(exclude_none=True),
             }

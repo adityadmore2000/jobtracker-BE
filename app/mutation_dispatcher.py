@@ -4,6 +4,7 @@ from typing import List
 
 from sqlalchemy.orm import Session
 
+from .company_resolution import get_or_create_company
 from .constants import (
     ALLOWED_CURRENT_STAGES,
     ALLOWED_EMPLOYMENT_TYPES,
@@ -23,8 +24,6 @@ from .mutation_schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Every operation in ALLOWED_OPERATIONS must appear here with an intentional mapping.
-# Operations that produce no SemanticTranscriptResponse "operation" value map to "none".
 _OPERATION_TO_TRANSCRIPT_OP: dict[str, str] = {
     "create_draft": "create",
     "patch_draft": "create",
@@ -32,7 +31,7 @@ _OPERATION_TO_TRANSCRIPT_OP: dict[str, str] = {
     "patch_application": "update",
     "discard_draft": "none",
     "ask_clarification": "none",
-    "append_note": "none",       # note-only mutation; no draft/application preview needed
+    "append_note": "none",
     "archive_application": "none",
     "restore_application": "none",
 }
@@ -57,7 +56,6 @@ def _validate_enum_fields(changes: ApplicationChanges, operation: str) -> Mutati
         canonical = normalize_status_value(changes.status)
         if canonical is None:
             return _error(operation, f"Invalid status '{changes.status}'. Allowed: {STATUS_OPTIONS}")
-        # Normalise in-place so downstream sees the canonical value
         changes.status = canonical
     if changes.employment_types is not None:
         invalid = [v for v in changes.employment_types if v not in ALLOWED_EMPLOYMENT_TYPES]
@@ -74,7 +72,8 @@ def _application_to_dict(app: JobApplication) -> dict:
     return {
         "id": app.id,
         "company": app.company,
-        "roles_json": app.roles_json,
+        "company_id": app.company_id,
+        "role": app.role,
         "employment_types_json": app.employment_types_json,
         "job_link": app.job_link,
         "location": app.location,
@@ -99,11 +98,12 @@ def _note_to_dict(note: ApplicationNote) -> dict:
     }
 
 
-def _apply_changes_to_application(app: JobApplication, changes: ApplicationChanges) -> None:
+def _apply_changes_to_application(app: JobApplication, changes: ApplicationChanges, db: Session) -> None:
     if changes.company is not None:
-        app.company = changes.company
-    if changes.roles is not None:
-        app.roles_json = list(changes.roles)
+        company_obj = get_or_create_company(db, changes.company)
+        app.company_id = company_obj.id
+    if changes.role is not None:
+        app.role = changes.role
     if changes.status is not None:
         app.status = changes.status
     if changes.priority is not None:
@@ -119,7 +119,6 @@ def _apply_changes_to_application(app: JobApplication, changes: ApplicationChang
 
 
 def _append_notes(application_id: int, notes: List[str], db: Session) -> List[ApplicationNote]:
-    """Insert one ApplicationNote row per note string. Must be called inside the parent transaction."""
     created = []
     for text in notes:
         note = ApplicationNote(
@@ -133,7 +132,6 @@ def _append_notes(application_id: int, notes: List[str], db: Session) -> List[Ap
 
 
 def _append_event(application_id: int, event_type: str, payload: dict, db: Session) -> ApplicationEvent:
-    """Insert one ApplicationEvent row. Must be called inside the parent transaction."""
     event = ApplicationEvent(
         application_id=application_id,
         event_type=event_type,
@@ -151,9 +149,10 @@ def handle_create_draft(payload: MutationPayload, db: Session) -> MutationResult
     if enum_error:
         return enum_error
 
+    company_obj = get_or_create_company(db, payload.changes.company)
     app = JobApplication(
-        company=payload.changes.company,
-        roles_json=list(payload.changes.roles) if payload.changes.roles else [],
+        company_id=company_obj.id,
+        role=payload.changes.role or "",
         employment_types_json=list(payload.changes.employment_types) if payload.changes.employment_types else [],
         job_link=payload.changes.job_link or "",
         location=payload.changes.location_mode or "",
@@ -194,7 +193,7 @@ def handle_patch_draft(payload: MutationPayload, db: Session) -> MutationResult:
         app = db.get(JobApplication, draft_id)
         if app is None or not app.is_draft:
             return _error("patch_draft", f"Draft with id {draft_id} not found")
-        _apply_changes_to_application(app, payload.changes)
+        _apply_changes_to_application(app, payload.changes, db)
         db.commit()
         db.refresh(app)
         return MutationResult(
@@ -233,7 +232,7 @@ def handle_save_draft(payload: MutationPayload, db: Session) -> MutationResult:
                 _append_event(app.id, "note_added", {"text": note.text}, db)
         db.commit()
         db.refresh(app)
-        notes_list = [_note_to_dict(n) for n in app.notes] if payload.notes_to_append else None
+        notes_list = [_note_to_dict(n) for n in app.notes_rel] if payload.notes_to_append else None
         return MutationResult(
             success=True,
             operation="save_draft",
@@ -242,14 +241,11 @@ def handle_save_draft(payload: MutationPayload, db: Session) -> MutationResult:
             notes=notes_list,
         )
 
-    # save_draft without a draft_id: no DB row exists yet; nothing to save.
     return _error("save_draft", "No active draft to save. Provide a draft_id.")
 
 
 def handle_discard_draft(payload: MutationPayload, db: Session) -> MutationResult:
     if payload.target.draft_id is None:
-        # Deliberate explicit no-op: there is no draft in context to discard.
-        # Return truthful success rather than silently implying something was deleted.
         return MutationResult(
             success=True,
             operation="discard_draft",
@@ -265,8 +261,6 @@ def handle_discard_draft(payload: MutationPayload, db: Session) -> MutationResul
         return _error("discard_draft", f"Draft with id {draft_id} not found")
     db.delete(app)
     db.commit()
-    # Note: discard hard-deletes the row without emitting an ApplicationEvent.
-    # This is intentional — discarded drafts are ephemeral and not tracked in the timeline.
     return MutationResult(
         success=True,
         operation="discard_draft",
@@ -289,19 +283,17 @@ def handle_patch_application(payload: MutationPayload, db: Session) -> MutationR
     if app.archived_at is not None:
         return _error("patch_application", f"Application {payload.target.application_id} is archived and cannot be patched.")
 
-    # Capture old values before applying changes
     old_status = app.status
     old_priority = app.priority
     old_location = app.location
     old_job_link = app.job_link
     old_company = app.company
-    old_roles = list(app.roles_json)
+    old_role = app.role
     old_employment_types = list(app.employment_types_json)
     old_current_stages = list(app.current_stages_json)
 
-    _apply_changes_to_application(app, payload.changes)
+    _apply_changes_to_application(app, payload.changes, db)
 
-    # Emit events for fields that actually changed
     if payload.changes.status is not None and app.status != old_status:
         _append_event(app.id, "status_changed", {"field": "status", "from": old_status, "to": app.status}, db)
     if payload.changes.priority is not None and app.priority != old_priority:
@@ -312,8 +304,8 @@ def handle_patch_application(payload: MutationPayload, db: Session) -> MutationR
         _append_event(app.id, "field_changed", {"field": "job_link", "from": old_job_link, "to": app.job_link}, db)
     if payload.changes.company is not None and app.company != old_company:
         _append_event(app.id, "field_changed", {"field": "company", "from": old_company, "to": app.company}, db)
-    if payload.changes.roles is not None and app.roles_json != old_roles:
-        _append_event(app.id, "field_changed", {"field": "roles", "from": old_roles, "to": app.roles_json}, db)
+    if payload.changes.role is not None and app.role != old_role:
+        _append_event(app.id, "field_changed", {"field": "role", "from": old_role, "to": app.role}, db)
     if payload.changes.employment_types is not None and app.employment_types_json != old_employment_types:
         _append_event(app.id, "field_changed", {"field": "employment_types", "from": old_employment_types, "to": app.employment_types_json}, db)
     if payload.changes.current_stages is not None and app.current_stages_json != old_current_stages:
@@ -326,7 +318,7 @@ def handle_patch_application(payload: MutationPayload, db: Session) -> MutationR
 
     db.commit()
     db.refresh(app)
-    notes_list = [_note_to_dict(n) for n in app.notes] if payload.notes_to_append else None
+    notes_list = [_note_to_dict(n) for n in app.notes_rel] if payload.notes_to_append else None
     return MutationResult(
         success=True,
         operation="patch_application",

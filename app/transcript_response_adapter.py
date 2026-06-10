@@ -11,7 +11,7 @@ def to_public_application(source: JobApplication | dict) -> PublicApplicationDTO
         return PublicApplicationDTO(
             id=source["id"],
             company=source["company"],
-            roles=source.get("roles_json") or [],
+            role=source.get("role") or "",
             employment_types=source.get("employment_types_json") or [],
             job_link=source.get("job_link") or "",
             location=source.get("location") or "",
@@ -30,7 +30,7 @@ def to_public_application(source: JobApplication | dict) -> PublicApplicationDTO
     return PublicApplicationDTO(
         id=source.id,
         company=source.company,
-        roles=list(source.roles_json) if source.roles_json else [],
+        role=source.role or "",
         employment_types=list(source.employment_types_json) if source.employment_types_json else [],
         job_link=source.job_link or "",
         location=source.location or "",
@@ -54,7 +54,7 @@ def _app_base_to_public_draft(base: JobApplicationBase, draft_id: str | None, dr
         return PublicApplicationDTO(
             id=draft_dict["id"],
             company=draft_dict.get("company") or base.company,
-            roles=draft_dict.get("roles_json") or list(base.roles_json),
+            role=draft_dict.get("role") or base.role,
             employment_types=draft_dict.get("employment_types_json") or list(base.employment_types_json),
             job_link=draft_dict.get("job_link") or base.job_link,
             location=draft_dict.get("location") or base.location,
@@ -70,11 +70,10 @@ def _app_base_to_public_draft(base: JobApplicationBase, draft_id: str | None, dr
             created_at=draft_dict.get("created_at") or draft_dict.get("draft_created_at"),
             updated_at=draft_dict.get("updated_at") or draft_dict.get("draft_created_at"),
         )
-    # Preview draft with no persisted row yet: use a sentinel id=0
     return PublicApplicationDTO(
         id=0,
         company=base.company,
-        roles=list(base.roles_json),
+        role=base.role,
         employment_types=list(base.employment_types_json),
         job_link=base.job_link,
         location=base.location,
@@ -94,14 +93,12 @@ def _app_base_to_public_draft(base: JobApplicationBase, draft_id: str | None, dr
 
 # Internal status → public status mapping
 _INTERNAL_TO_PUBLIC: dict[str, str] = {
-    # SemanticTranscriptResponse.status → PublicTranscriptResponse.status
-    "preview": "__resolve_by_operation__",   # resolved by MutationResult.operation
+    "preview": "__resolve_by_operation__",
     "clarification_required": "clarification",
     "unsupported": "no_change",
     "unavailable": "error",
 }
 
-# Internal MutationResult.operation → public status (when internal status == "preview")
 _OPERATION_TO_PUBLIC_STATUS: dict[str, str] = {
     "create_draft": "draft_created",
     "patch_draft": "draft_updated",
@@ -129,38 +126,13 @@ _DEFAULT_MESSAGES: dict[str, str] = {
 def to_public_transcript_response(internal: SemanticTranscriptResponse) -> PublicTranscriptResponse:
     """Map SemanticTranscriptResponse → PublicTranscriptResponse."""
     internal_status = internal.status
-    operation = internal.operation  # "create" | "update" | "none"
+    operation = internal.operation
 
-    # Determine public status
     if internal_status == "preview":
-        # Derive from the MutationResult operation embedded in the proposal
-        # The proposal.tool_name tells us which handler ran; but the internal
-        # response was built from MutationResult.operation. We recover it by
-        # looking at the operation field ("create" / "update" / "none") and the
-        # draft/application shape.
         if operation == "create":
             if internal.draft_id is not None:
-                # draft_id present means create_draft or patch_draft ran
-                # Distinguish: if the draft field contains an id, we check whether
-                # draft was previously present (the semantic layer does not distinguish
-                # create vs patch in the operation field, but uses "create" for both).
-                # We use proposal.tool_name as the reliable discriminator.
                 tool = getattr(internal.proposal, "tool_name", None) or ""
                 if tool == "patch_active_draft":
-                    # patch_active_draft maps to create_draft (no existing draft) OR
-                    # patch_draft (existing draft). The mutation_result operation is in
-                    # MutationResult but not surfaced in SemanticTranscriptResponse.
-                    # We look at needs_confirmation / confirmation_kind as a proxy.
-                    # The most reliable signal: if draft_id was already in context
-                    # (from the incoming payload) and we returned the same id, it's
-                    # a patch. But we can't recover context here.
-                    # Safe approach: trust the draft DTO. If draft has no id (id==0
-                    # or None), it's a pure preview without mutation; if it has an id,
-                    # the mutation ran. The public status distinguishes create vs update
-                    # only if the mutation was a patch_draft vs create_draft.
-                    # Since the SemanticTranscriptResponse does NOT carry the internal
-                    # MutationResult operation, we use confirmation_kind as a proxy:
-                    # "context" → patch, "none" → create (new draft).
                     if internal.confirmation_kind == "context":
                         public_status = "draft_updated"
                     else:
@@ -174,8 +146,6 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
         elif operation == "update":
             public_status = "updated"
         else:
-            # operation == "none" under "preview" should not occur in practice;
-            # treat as no_change.
             public_status = "no_change"
     elif internal_status == "clarification_required":
         public_status = "clarification"
@@ -186,7 +156,6 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
     else:
         public_status = "no_change"
 
-    # Message: prefer warnings/clarification, then fall back to canonical default
     if public_status == "clarification":
         message = internal.clarification_question or _DEFAULT_MESSAGES["clarification"]
     elif public_status == "no_change":
@@ -196,13 +165,12 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
     else:
         message = _DEFAULT_MESSAGES.get(public_status, "Done.")
 
-    # Build public draft DTO
     public_draft: PublicApplicationDTO | None = None
     if internal.draft is not None:
         public_draft = PublicApplicationDTO(
             id=0,
             company=internal.draft.company,
-            roles=list(internal.draft.roles_json),
+            role=internal.draft.role,
             employment_types=list(internal.draft.employment_types_json),
             job_link=internal.draft.job_link or "",
             location=internal.draft.location or "",

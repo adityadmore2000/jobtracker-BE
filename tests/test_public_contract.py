@@ -52,10 +52,10 @@ def make_payload(operation: str, changes: dict | None = None, target: dict | Non
 # Application DTO field presence / absence
 # ---------------------------------------------------------------------------
 
-CANONICAL_ARRAY_FIELDS = {"roles", "employment_types", "current_stages"}
+CANONICAL_ARRAY_FIELDS = {"employment_types", "current_stages"}
 INTERNAL_ARRAY_FIELDS = {"roles_json", "employment_types_json", "current_stages_json"}
 CANONICAL_SCALAR_FIELDS = {
-    "id", "company", "job_link", "location", "status", "priority",
+    "id", "company", "role", "job_link", "location", "status", "priority",
     "engaged_days", "next_action", "comments", "is_draft",
     "draft_created_at", "archived_at", "created_at", "updated_at",
 }
@@ -74,7 +74,7 @@ def _assert_public_application_shape(app_dict: dict) -> None:
 @pytest.mark.anyio
 async def test_list_applications_uses_canonical_fields(client, db):
     # Seed a saved application
-    create = dispatch(make_payload("create_draft", changes={"company": "PublicCo", "roles": ["AI Engineer"]}), db)
+    create = dispatch(make_payload("create_draft", changes={"company": "PublicCo", "role": "AI Engineer"}), db)
     dispatch(make_payload("save_draft", target={"draft_id": str(create.draft["id"])}), db)
 
     response = await client.get("/applications")
@@ -89,7 +89,7 @@ async def test_list_applications_uses_canonical_fields(client, db):
 
 @pytest.mark.anyio
 async def test_list_archived_applications_uses_canonical_fields(client, db):
-    create = dispatch(make_payload("create_draft", changes={"company": "ArchivedPublicCo", "roles": ["ML Researcher"]}), db)
+    create = dispatch(make_payload("create_draft", changes={"company": "ArchivedPublicCo", "role": "ML Researcher"}), db)
     save = dispatch(make_payload("save_draft", target={"draft_id": str(create.draft["id"])}), db)
     dispatch(make_payload("archive_application", target={"application_id": save.application["id"]}), db)
 
@@ -107,7 +107,7 @@ async def test_list_archived_applications_uses_canonical_fields(client, db):
 async def test_list_applications_multi_value_fields_preserved(client, db):
     create = dispatch(make_payload("create_draft", changes={
         "company": "MultiCo",
-        "roles": ["AI Engineer", "RAG Engineer"],
+        "role": "AI Engineer",
         "employment_types": ["Full Time", "Part Time"],
         "current_stages": ["Tailored", "Applied"],
     }), db)
@@ -120,8 +120,7 @@ async def test_list_applications_multi_value_fields_preserved(client, db):
     multi_apps = [a for a in body if a.get("company") == "MultiCo"]
     assert len(multi_apps) >= 1
     app_data = multi_apps[0]
-    assert "AI Engineer" in app_data["roles"]
-    assert "RAG Engineer" in app_data["roles"]
+    assert app_data["role"] == "AI Engineer"
     assert "Full Time" in app_data["employment_types"]
     assert "Part Time" in app_data["employment_types"]
     assert "Tailored" in app_data["current_stages"]
@@ -155,7 +154,7 @@ class _FakeInterpreterBase:
         return {}
 
 
-def _make_patch_active_draft_interpreter(company="Neilsoft", roles=None):
+def _make_patch_active_draft_interpreter(company="Neilsoft", role=None):
     class FakeInterpreter(_FakeInterpreterBase):
         def interpret(self, transcript, context=None):
             from app.semantic_interpreter import SemanticInterpretationResult
@@ -163,13 +162,13 @@ def _make_patch_active_draft_interpreter(company="Neilsoft", roles=None):
                 proposal=SemanticToolCallProposal(
                     tool_name="patch_active_draft",
                     arguments={
-                        "fields": {"company": company, "roles": roles or ["AI Engineer"]},
+                        "fields": {"company": company, "role": role or "AI Engineer"},
                         "replace_explicit_fields": True,
                         "context_notes": [],
                     },
                 ),
                 metrics=SemanticInterpreterMetrics(latency_ms=10),
-                extracted_fields=SemanticExtractedFields(company=company, roles=roles or ["AI Engineer"]),
+                extracted_fields=SemanticExtractedFields(company=company, role=role or "AI Engineer"),
             )
     return FakeInterpreter()
 
@@ -205,21 +204,21 @@ async def test_transcript_create_draft_returns_draft_created(client):
     assert body["draft"] is not None
     assert body["draft"]["company"] == "Neilsoft"
     assert "roles_json" not in body["draft"]
-    assert isinstance(body["draft"]["roles"], list)
-    assert "AI Engineer" in body["draft"]["roles"]
+    assert isinstance(body["draft"]["role"], str)
+    assert body["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_transcript_patch_draft_returns_draft_updated(client, db):
     # Create a draft first
-    create = dispatch(make_payload("create_draft", changes={"company": "PatchCo", "roles": ["AI Engineer"]}), db)
+    create = dispatch(make_payload("create_draft", changes={"company": "PatchCo", "role": "AI Engineer"}), db)
     draft_id = str(create.draft["id"])
 
-    app.dependency_overrides[get_semantic_interpreter] = lambda: _make_patch_active_draft_interpreter(company="PatchCo", roles=["AI Engineer"])
+    app.dependency_overrides[get_semantic_interpreter] = lambda: _make_patch_active_draft_interpreter(company="PatchCo", role="AI Engineer")
     try:
         response = await client.post(
             "/transcript/parse",
-            json={"transcript": "Set priority high", "context": {"draft_id": draft_id, "active_draft": {"company": "PatchCo", "roles": ["AI Engineer"]}}},
+            json={"transcript": "Set priority high", "context": {"draft_id": draft_id, "active_draft": {"company": "PatchCo", "role": "AI Engineer"}}},
         )
     finally:
         app.dependency_overrides.pop(get_semantic_interpreter, None)
@@ -258,7 +257,7 @@ async def test_transcript_draft_payload_has_canonical_array_fields(client):
     body = response.json()
     draft = body.get("draft")
     if draft is not None:
-        assert "roles" in draft
+        assert "role" in draft
         assert "employment_types" in draft
         assert "current_stages" in draft
         for field in INTERNAL_ARRAY_FIELDS:
@@ -298,7 +297,7 @@ async def test_transcript_no_internal_fields_exposed(client):
 
 @pytest.mark.anyio
 async def test_save_draft_via_transcript_returns_saved(client, db):
-    create = dispatch(make_payload("create_draft", changes={"company": "SaveTransCo", "roles": ["AI Engineer"]}), db)
+    create = dispatch(make_payload("create_draft", changes={"company": "SaveTransCo", "role": "AI Engineer"}), db)
     draft_id = str(create.draft["id"])
 
     class SaveInterpreter(_FakeInterpreterBase):
@@ -321,7 +320,7 @@ async def test_save_draft_via_transcript_returns_saved(client, db):
                 "transcript": "save it",
                 "context": {
                     "draft_id": draft_id,
-                    "active_draft": {"company": "SaveTransCo", "roles": ["AI Engineer"]},
+                    "active_draft": {"company": "SaveTransCo", "role": "AI Engineer"},
                 },
             },
         )
@@ -373,7 +372,7 @@ async def test_discard_without_draft_returns_no_change_or_discarded(client, db):
 
 @pytest.mark.anyio
 async def test_patch_application_via_transcript_returns_updated(client, db):
-    create = dispatch(make_payload("create_draft", changes={"company": "UpdateCo", "roles": ["AI Engineer"]}), db)
+    create = dispatch(make_payload("create_draft", changes={"company": "UpdateCo", "role": "AI Engineer"}), db)
     save = dispatch(make_payload("save_draft", target={"draft_id": str(create.draft["id"])}), db)
     app_id = save.application["id"]
 

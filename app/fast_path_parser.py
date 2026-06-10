@@ -36,6 +36,7 @@ def _resolve_application_id_by_company(company_name: str, context: dict) -> int 
     ]
     if len(matches) == 1:
         return matches[0].get("id")
+    # If multiple rows share the same company (different roles), can't resolve by company alone
     return None
 
 

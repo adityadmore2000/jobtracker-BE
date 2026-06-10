@@ -23,7 +23,7 @@ class MutationTarget(BaseModel):
 
 class ApplicationChanges(BaseModel):
     company: Optional[str] = None
-    roles: Optional[List[str]] = None
+    role: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
     location_mode: Optional[str] = None

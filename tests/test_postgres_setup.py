@@ -159,6 +159,7 @@ def test_alembic_upgrades_fresh_job_tracker_test_database_successfully() -> None
         "asr_company_correction_events",
         "browser_context",
         "canonical_companies",
+        "companies",
         "company_aliases",
         "job_applications",
     }

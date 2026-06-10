@@ -15,6 +15,7 @@ from .company_resolution import (
     get_application_matches_for_company,
     get_canonical_company_by_normalized_name,
     get_company_alias_by_normalized_name,
+    get_or_create_company,
     resolve_company_name,
 )
 from .constants import (
@@ -28,7 +29,7 @@ from .constants import (
 from .database import get_db
 from .livekit_config import LiveKitConfigurationError, get_livekit_settings
 from .migrations import run_startup_migrations_if_enabled
-from .models import ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, CompanyAlias, JobApplication
+from .models import ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, Company, CompanyAlias, JobApplication
 from .mutation_dispatcher import dispatch
 from .mutation_schemas import MutationPayload, MutationTarget, ApplicationChanges
 from .public_schemas import PublicApplicationDTO, PublicTranscriptResponse
@@ -93,22 +94,32 @@ app.add_middleware(
 
 
 def create_job_application(db: Session, payload: JobApplicationCreate) -> JobApplication:
-    application = JobApplication(**payload.model_dump())
+    company_obj = get_or_create_company(db, payload.company)
+    application = JobApplication(
+        company_id=company_obj.id,
+        role=payload.role,
+        employment_types_json=list(payload.employment_types_json),
+        job_link=payload.job_link,
+        location=payload.location,
+        status=payload.status,
+        current_stages_json=list(payload.current_stages_json),
+        priority=payload.priority,
+        engaged_days=payload.engaged_days,
+        next_action=payload.next_action,
+        comments=payload.comments,
+    )
     db.add(application)
     db.flush()
     return application
 
 
-def find_duplicate_role(db: Session, canonical_company_name: str, incoming_roles: list[str]) -> str | None:
-    existing_roles = {
-        normalize_role_title(existing_role).casefold()
-        for application in get_application_matches_for_company(db, canonical_company_name)
-        for existing_role in application.roles_json
-    }
-    for incoming_role in incoming_roles:
-        if normalize_role_title(incoming_role).casefold() in existing_roles:
-            return incoming_role
-    return None
+def find_duplicate_role(db: Session, company_name: str, incoming_role: str) -> bool:
+    """Return True if there is already a non-archived saved application at this company with this role."""
+    normalized_incoming = normalize_role_title(incoming_role).casefold()
+    for application in get_application_matches_for_company(db, company_name):
+        if normalize_role_title(application.role).casefold() == normalized_incoming:
+            return True
+    return False
 
 
 def maybe_create_alias(
@@ -223,7 +234,7 @@ async def patch_draft(
 
     changes = ApplicationChanges(
         company=payload.company,
-        roles=payload.roles,
+        role=payload.role,
         status=payload.status,
         priority=payload.priority,
         location_mode=payload.location,
@@ -240,7 +251,6 @@ async def patch_draft(
     if not result.success:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
 
-    # Apply open-ended fields not covered by ApplicationChanges
     if payload.engaged_days is not None:
         app_row.engaged_days = payload.engaged_days
     if payload.next_action is not None:
@@ -378,13 +388,15 @@ async def create_application_candidate(
     if resolved_company_name is None:
         return {"status": "confirmation_required", "requires_confirmation": True, "candidate": payload}
 
-    application_payload = JobApplicationCreate(**(payload.model_dump(exclude={"raw_transcript", "original_extracted_company_name", "audio_reference"}) | {"company": resolved_company_name}))
+    application_payload = JobApplicationCreate(
+        **(payload.model_dump(exclude={"raw_transcript", "original_extracted_company_name", "audio_reference"})
+           | {"company": resolved_company_name})
+    )
 
-    duplicate_role = find_duplicate_role(db, resolved_company_name, application_payload.roles_json)
-    if duplicate_role is not None:
+    if find_duplicate_role(db, resolved_company_name, application_payload.role):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Application for {resolved_company_name} — {duplicate_role} already exists.",
+            detail=f"Application for {resolved_company_name} — {application_payload.role} already exists.",
         )
 
     application = create_job_application(db, application_payload)
@@ -406,7 +418,8 @@ async def confirm_company_and_create_application(
         final_company_name = canonical_company.canonical_name
 
     application_payload = JobApplicationCreate(
-        **(payload.model_dump(exclude={"confirmed_company_name", "raw_transcript", "original_extracted_company_name", "audio_reference"}) | {"company": final_company_name})
+        **(payload.model_dump(exclude={"confirmed_company_name", "raw_transcript", "original_extracted_company_name", "audio_reference"})
+           | {"company": final_company_name})
     )
     application = create_job_application(db, application_payload)
 
@@ -441,7 +454,15 @@ async def update_application(
             detail="Cannot update a draft application directly. Use the transcript interface.",
         )
 
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    update_data = payload.model_dump(exclude_unset=True)
+
+    # Company change must go through get_or_create_company
+    if "company" in update_data:
+        new_company_name = update_data.pop("company")
+        company_obj = get_or_create_company(db, new_company_name)
+        application.company_id = company_obj.id
+
+    for field, value in update_data.items():
         setattr(application, field, value)
 
     db.commit()
@@ -454,10 +475,11 @@ async def delete_application(application_id: int, db: Session = Depends(get_db))
     application = db.get(JobApplication, application_id)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+    role_label = application.role or "application"
     return {
         "requires_confirmation": True,
         "confirmation_kind": "archive",
-        "message": f"Archive {application.company} — {', '.join(application.roles_json) if application.roles_json else 'application'}?",
+        "message": f"Archive {application.company} — {role_label}?",
         "application_id": application_id,
     }
 

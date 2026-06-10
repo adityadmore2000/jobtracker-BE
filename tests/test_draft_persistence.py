@@ -40,7 +40,7 @@ def make_payload(operation: str, changes: dict | None = None, target: dict | Non
 
 
 def test_create_draft_creates_db_row(db):
-    payload = make_payload("create_draft", changes={"company": "Neilsoft", "roles": ["AI Engineer"]})
+    payload = make_payload("create_draft", changes={"company": "Neilsoft", "role": "AI Engineer"})
     result = dispatch(payload, db)
 
     assert result.success is True
@@ -84,7 +84,7 @@ def test_patch_draft_updates_db_row(db):
 
 
 def test_save_draft_sets_is_draft_false(db):
-    create_payload = make_payload("create_draft", changes={"company": "Neilsoft", "roles": ["AI Engineer"]})
+    create_payload = make_payload("create_draft", changes={"company": "Neilsoft", "role": "AI Engineer"})
     create_result = dispatch(create_payload, db)
     assert create_result.success is True
     draft_id = str(create_result.draft["id"])
@@ -101,7 +101,7 @@ def test_save_draft_sets_is_draft_false(db):
 
 @pytest.mark.anyio
 async def test_save_draft_row_visible_in_applications_list(client, db):
-    create_payload = make_payload("create_draft", changes={"company": "DraftCo", "roles": ["Engineer"]})
+    create_payload = make_payload("create_draft", changes={"company": "DraftCo", "role": "Engineer"})
     create_result = dispatch(create_payload, db)
     draft_id = str(create_result.draft["id"])
 
@@ -148,13 +148,13 @@ async def test_draft_id_returned_in_transcript_response(client):
                 proposal=SemanticToolCallProposal(
                     tool_name="patch_active_draft",
                     arguments={
-                        "fields": {"company": "NewCo", "roles": ["AI Engineer"]},
+                        "fields": {"company": "NewCo", "role": "AI Engineer"},
                         "replace_explicit_fields": True,
                         "context_notes": [],
                     },
                 ),
                 metrics=SemanticInterpreterMetrics(latency_ms=10),
-                extracted_fields=SemanticExtractedFields(company="NewCo", roles=["AI Engineer"]),
+                extracted_fields=SemanticExtractedFields(company="NewCo", role="AI Engineer"),
             )
 
         def health_check(self):
@@ -192,7 +192,7 @@ async def test_draft_id_returned_in_transcript_response(client):
 async def test_fast_path_save_returns_saved_state_not_preview_with_confirmation(client, db):
     """Fast-path 'save' dispatches once, row becomes is_draft=False, response reflects saved state."""
     # Create a draft row via dispatcher
-    create_payload = make_payload("create_draft", changes={"company": "SaveFlowCo", "roles": ["AI Engineer"]})
+    create_payload = make_payload("create_draft", changes={"company": "SaveFlowCo", "role": "AI Engineer"})
     create_result = dispatch(create_payload, db)
     assert create_result.success is True
     draft_id = str(create_result.draft["id"])

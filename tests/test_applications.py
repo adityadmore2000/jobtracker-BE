@@ -14,7 +14,6 @@ from app.semantic_validation import (
     normalize_patch_active_draft_argument_shape,
     normalize_semantic_field_patch_argument_shape,
     normalize_role_title,
-    normalize_roles,
 )
 from app.semantic_interpreter import (
     SemanticInterpretationResult,
@@ -27,7 +26,7 @@ from app.semantic_schemas import SemanticExtractedFields
 
 REALISTIC_RECORD = {
     "company": "Bootcoding Pvt. LTD",
-    "roles_json": ["AI Engineer"],
+    "role": "AI Engineer",
     "employment_types_json": ["Internship"],
     "job_link": "https://example.com/job",
     "location": "onsite",
@@ -143,7 +142,7 @@ def register_known_company(canonical_name: str, alias_text: str | None = None) -
         db.commit()
 
 
-def test_normalize_patch_active_draft_argument_shape_promotes_scalar_roles_to_array():
+def test_normalize_patch_active_draft_argument_shape_promotes_scalar_roles_to_role():
     repaired = normalize_patch_active_draft_argument_shape(
         proposal(
             tool_name="patch_active_draft",
@@ -151,10 +150,11 @@ def test_normalize_patch_active_draft_argument_shape_promotes_scalar_roles_to_ar
         )
     )
 
-    assert repaired.arguments["fields"]["roles"] == ["AI Engineer"]
+    assert repaired.arguments["fields"]["role"] == "AI Engineer"
+    assert "roles" not in repaired.arguments["fields"]
 
 
-def test_normalize_patch_active_draft_argument_shape_promotes_role_alias_to_roles_array():
+def test_normalize_patch_active_draft_argument_shape_preserves_role_scalar():
     repaired = normalize_patch_active_draft_argument_shape(
         proposal(
             tool_name="patch_active_draft",
@@ -162,11 +162,13 @@ def test_normalize_patch_active_draft_argument_shape_promotes_role_alias_to_role
         )
     )
 
-    assert repaired.arguments["fields"]["roles"] == ["AI Engineer"]
-    assert "role" not in repaired.arguments["fields"]
+    assert repaired.arguments["fields"]["role"] == "AI Engineer"
+    assert "roles" not in repaired.arguments["fields"]
 
 
 def test_normalize_patch_active_draft_argument_shape_rejects_conflicting_role_and_roles_values():
+    # roles:["ML Engineer"] and role:"AI Engineer" conflict → normalize_semantic_field_patch_argument_shape returns None
+    # → normalize_patch_active_draft_argument_shape returns the original proposal unchanged
     unrepaired = normalize_patch_active_draft_argument_shape(
         proposal(
             tool_name="patch_active_draft",
@@ -178,6 +180,7 @@ def test_normalize_patch_active_draft_argument_shape_rejects_conflicting_role_an
         )
     )
 
+    # When normalization fails, the original proposal is returned unchanged
     assert unrepaired.arguments["fields"]["role"] == "AI Engineer"
     assert unrepaired.arguments["fields"]["roles"] == ["ML Engineer"]
 
@@ -206,16 +209,16 @@ def test_normalize_role_title_preserves_computer_vision_engineer():
     assert normalize_role_title("Computer Vision Engineer") == "Computer Vision Engineer"
 
 
-def test_normalize_roles_accepts_open_ended_role_titles():
-    assert normalize_roles(["Applied AI Engineer"], tool_name="patch_active_draft") == ["Applied AI Engineer"]
+def test_normalize_role_title_accepts_open_ended_role_titles():
+    assert normalize_role_title("Applied AI Engineer") == "Applied AI Engineer"
 
 
-def test_normalize_roles_rejects_blank_role_value():
-    assert normalize_roles(["   "], tool_name="patch_active_draft") is None
+def test_normalize_role_title_rejects_blank_role_value():
+    assert normalize_role_title("   ") is None
 
 
-def test_normalize_roles_accepts_unknown_but_non_blank_role_title():
-    assert normalize_roles(["Unknown Ninja Role"], tool_name="patch_active_draft") == ["Unknown Ninja Role"]
+def test_normalize_role_title_accepts_unknown_but_non_blank_role_title():
+    assert normalize_role_title("Unknown Ninja Role") == "Unknown Ninja Role"
 
 
 def test_normalize_semantic_field_patch_argument_shape_converts_fulltime_to_full_time():
@@ -479,7 +482,7 @@ async def test_parse_transcript_patch_active_draft_returns_preview_data(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
 
 
@@ -496,7 +499,7 @@ async def test_parse_transcript_partial_draft_accepts_company_only_phrase(client
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == []
+    assert parsed["draft"]["role"] == ""
     assert parsed["clarification_question"] is None
 
 
@@ -559,7 +562,7 @@ def test_detect_explicit_known_companies_prefers_longest_phrase_first(db_session
 async def test_parse_transcript_known_company_reconciles_missing_company_for_patch_active_draft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -570,7 +573,7 @@ async def test_parse_transcript_known_company_reconciles_missing_company_for_pat
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert interpreter.calls[0]["context"]["explicit_known_companies"] == ["Neilsoft"]
 
 
@@ -578,7 +581,7 @@ async def test_parse_transcript_known_company_reconciles_missing_company_for_pat
 async def test_parse_transcript_conversational_extraction_safely_merges_missing_role(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft"}, "replace_explicit_fields": True, "context_notes": []},
@@ -593,7 +596,7 @@ async def test_parse_transcript_conversational_extraction_safely_merges_missing_
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert interpreter.calls[0]["context"]["explicit_known_companies"] == ["Neilsoft"]
 
 
@@ -601,7 +604,7 @@ async def test_parse_transcript_conversational_extraction_safely_merges_missing_
 async def test_parse_transcript_role_alias_shape_is_repaired_for_varied_word_order(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "role": "AI Engineer"}, "replace_explicit_fields": True, "context_notes": []},
@@ -612,7 +615,7 @@ async def test_parse_transcript_role_alias_shape_is_repaired_for_varied_word_ord
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
@@ -629,14 +632,14 @@ async def test_parse_transcript_scalar_roles_shape_is_repaired(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_role_at_neilsoft_for_ai_engineer(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -647,14 +650,14 @@ async def test_parse_transcript_role_at_neilsoft_for_ai_engineer(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_ai_engineer_role_for_neilsoft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -665,14 +668,14 @@ async def test_parse_transcript_ai_engineer_role_for_neilsoft(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_at_neilsoft_role_is_ai_engineer(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -683,14 +686,14 @@ async def test_parse_transcript_at_neilsoft_role_is_ai_engineer(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_track_ai_engineer_opening_at_neilsoft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft"}, "replace_explicit_fields": True, "context_notes": []},
@@ -701,14 +704,14 @@ async def test_parse_transcript_track_ai_engineer_opening_at_neilsoft(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_applied_ai_engineer_role_for_neilsoft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["Applied AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "Applied AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["Applied AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -719,14 +722,14 @@ async def test_parse_transcript_applied_ai_engineer_role_for_neilsoft(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["Applied AI Engineer"]
+    assert parsed["draft"]["role"] == "Applied AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_ai_engineer_intern_role_for_neilsoft(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer Intern"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer Intern"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft", "roles": ["AI Engineer Intern"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -737,7 +740,7 @@ async def test_parse_transcript_ai_engineer_intern_role_for_neilsoft(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer Intern"]
+    assert parsed["draft"]["role"] == "AI Engineer Intern"
 
 
 @pytest.mark.anyio
@@ -746,7 +749,7 @@ async def test_parse_transcript_representative_patch_normalizes_multiple_fields(
     interpreter = FakeInterpreter(
         extracted_fields={
             "company": "Neilsoft",
-            "roles": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types": ["fulltime"],
             "location": "onsite",
             "priority": "high",
@@ -756,7 +759,7 @@ async def test_parse_transcript_representative_patch_normalizes_multiple_fields(
             arguments={
                 "fields": {
                     "company": "Neilsoft",
-                    "role": "AI Engineer role",
+                    "role": "AI Engineer",
                     "type": "fulltime",
                     "location": "on site",
                     "priority": "high priority",
@@ -771,7 +774,7 @@ async def test_parse_transcript_representative_patch_normalizes_multiple_fields(
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
     assert parsed["draft"]["priority"] == "HIGH"
@@ -783,7 +786,7 @@ async def test_parse_transcript_reported_false_conflict_sentence_uses_authoritat
     interpreter = FakeInterpreter(
         extracted_fields={
             "company": "Neilsoft",
-            "roles": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types": ["Full Time"],
             "location": "onsite",
         },
@@ -810,7 +813,7 @@ async def test_parse_transcript_reported_false_conflict_sentence_uses_authoritat
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
 
@@ -819,7 +822,7 @@ async def test_parse_transcript_reported_false_conflict_sentence_uses_authoritat
 async def test_parse_transcript_multi_word_company_role_variant(client):
     register_known_company("Rockwell Automation")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Rockwell Automation", "roles": ["ML Engineer"]},
+        extracted_fields={"company": "Rockwell Automation", "role": "ML Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Rockwell Automation", "roles": ["ML Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -830,14 +833,14 @@ async def test_parse_transcript_multi_word_company_role_variant(client):
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Rockwell Automation"
-    assert parsed["draft"]["roles"] == ["ML Engineer"]
+    assert parsed["draft"]["role"] == "ML Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_filler_is_ignored_during_extraction_merge(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "Neilsoft"}, "replace_explicit_fields": True, "context_notes": []},
@@ -852,7 +855,7 @@ async def test_parse_transcript_filler_is_ignored_during_extraction_merge(client
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
@@ -884,7 +887,7 @@ async def test_parse_transcript_remote_fulltime_role_extraction_is_preserved(cli
     interpreter = FakeInterpreter(
         extracted_fields={
             "company": "Neilsoft",
-            "roles": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types": ["Full Time"],
             "location": "remote",
         },
@@ -902,7 +905,7 @@ async def test_parse_transcript_remote_fulltime_role_extraction_is_preserved(cli
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "remote"
 
@@ -913,7 +916,7 @@ async def test_parse_transcript_equivalent_selected_values_do_not_conflict(clien
     interpreter = FakeInterpreter(
         extracted_fields={
             "company": "Neilsoft",
-            "roles": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types": ["Full Time"],
             "location": "onsite",
         },
@@ -935,16 +938,18 @@ async def test_parse_transcript_equivalent_selected_values_do_not_conflict(clien
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
 
 
 @pytest.mark.anyio
-async def test_parse_transcript_conflicting_role_and_roles_values_fail_safely(client):
+async def test_parse_transcript_legacy_roles_array_dropped_when_role_scalar_present(client):
+    """When LLM sends both 'role' (scalar) and stale 'roles' (array) with different values,
+    normalization drops 'roles' and the authoritative extracted scalar role wins."""
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={
@@ -957,8 +962,8 @@ async def test_parse_transcript_conflicting_role_and_roles_values_fail_safely(cl
 
     parsed = await parse_transcript(client, "Role at Neilsoft for AI Engineer", interpreter)
 
-    assert parsed["status"] == "no_change"
-    assert "Extracted fields conflicted with selected tool arguments. No tracker changes were saved." in parsed["warnings"]
+    assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
@@ -966,7 +971,7 @@ async def test_parse_transcript_extracted_company_conflict_fails_safely_without_
     register_known_company("Neilsoft")
     register_known_company("Rockwell Automation")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={
@@ -991,7 +996,7 @@ async def test_parse_transcript_extracted_company_conflict_fails_safely_without_
 async def test_parse_transcript_real_field_conflict_fails_safely_without_db_write(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"], "location": "onsite"},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer", "location": "onsite"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={
@@ -1089,7 +1094,7 @@ async def test_parse_transcript_known_company_retry_recovers_missing_company_cla
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert len(interpreter.calls) == 2
     assert interpreter.calls[1]["context"]["explicit_company_retry_hint"] is not None
 
@@ -1122,7 +1127,7 @@ async def test_parse_transcript_schema_repair_retry_recovers_invalid_first_shape
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert len(interpreter.calls) == 2
     assert interpreter.calls[1]["context"]["schema_repair_retry_hint"] is not None
 
@@ -1149,7 +1154,7 @@ async def test_parse_transcript_patch_active_draft_uses_active_context_when_need
             "active_application": {"application_id": created["id"]},
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": ["RAG Engineer"],
+                "role": "RAG Engineer",
                 "employment_types": ["Full Time"],
                 "job_link": "",
                 "location": "onsite",
@@ -1165,7 +1170,7 @@ async def test_parse_transcript_patch_active_draft_uses_active_context_when_need
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["RAG Engineer"]
+    assert parsed["draft"]["role"] == "RAG Engineer"
     assert parsed["draft"]["priority"] == "HIGH"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
@@ -1189,7 +1194,7 @@ async def test_parse_transcript_patch_active_draft_preserves_company_for_role_fo
         context={
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": [],
+                "role": "",
                 "employment_types": [],
                 "job_link": "",
                 "location": "",
@@ -1205,7 +1210,7 @@ async def test_parse_transcript_patch_active_draft_preserves_company_for_role_fo
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
@@ -1228,7 +1233,7 @@ async def test_parse_transcript_patch_active_draft_preserves_company_for_type_an
         context={
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": ["AI Engineer"],
+                "role": "AI Engineer",
                 "employment_types": [],
                 "job_link": "",
                 "location": "",
@@ -1244,7 +1249,7 @@ async def test_parse_transcript_patch_active_draft_preserves_company_for_type_an
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
 
@@ -1265,7 +1270,7 @@ async def test_parse_transcript_patch_active_draft_normalizes_current_stage_alia
         context={
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": ["AI Engineer"],
+                "role": "AI Engineer",
                 "employment_types": ["Full Time"],
                 "job_link": "",
                 "location": "",
@@ -1281,7 +1286,7 @@ async def test_parse_transcript_patch_active_draft_normalizes_current_stage_alia
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["current_stages"] == ["Applied"]
 
@@ -1302,7 +1307,7 @@ async def test_parse_transcript_patch_active_draft_preserves_prior_fields_for_st
         context={
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": ["AI Engineer"],
+                "role": "AI Engineer",
                 "employment_types": ["Full Time"],
                 "job_link": "",
                 "location": "onsite",
@@ -1318,7 +1323,7 @@ async def test_parse_transcript_patch_active_draft_preserves_prior_fields_for_st
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["location"] == "onsite"
     assert parsed["draft"]["current_stages"] == ["Applied"]
@@ -1426,7 +1431,7 @@ async def test_parse_transcript_existing_company_alias_resolves_to_canonical_pre
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -1497,7 +1502,7 @@ async def test_parse_transcript_multiple_explicit_companies_return_safe_clarific
 @pytest.mark.anyio
 async def test_parse_transcript_unknown_company_follows_existing_safe_behavior(client):
     interpreter = FakeInterpreter(
-        extracted_fields={"roles": ["AI Engineer"]},
+        extracted_fields={"role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"roles": ["AI Engineer"]}, "replace_explicit_fields": True, "context_notes": []},
@@ -1513,7 +1518,7 @@ async def test_parse_transcript_unknown_company_follows_existing_safe_behavior(c
 @pytest.mark.anyio
 async def test_parse_transcript_unknown_new_company_still_supported_via_extraction(client):
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "NewStartup Labs", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "NewStartup Labs", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={"fields": {"company": "NewStartup Labs"}, "replace_explicit_fields": True, "context_notes": []},
@@ -1524,13 +1529,13 @@ async def test_parse_transcript_unknown_new_company_still_supported_via_extracti
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "NewStartup Labs"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
 async def test_parse_transcript_preview_existing_application_update_resolves_single_row(client):
-    created = await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "roles_json": ["AI Engineer"]})
-    await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "roles_json": ["GET"]})
+    created = await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "role": "AI Engineer"})
+    await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "role": "GET"})
     interpreter = FakeInterpreter(
         proposal=proposal(
             tool_name="preview_existing_application_update",
@@ -1551,8 +1556,8 @@ async def test_parse_transcript_preview_existing_application_update_resolves_sin
 
 @pytest.mark.anyio
 async def test_parse_transcript_multiple_company_matches_return_clarification(client):
-    await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "roles_json": ["AI Engineer"]})
-    await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "roles_json": ["GET"]})
+    await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "role": "AI Engineer"})
+    await create_record(client, REALISTIC_RECORD | {"company": "Rockwell Automation", "role": "GET"})
     interpreter = FakeInterpreter(
         proposal=proposal(
             tool_name="preview_existing_application_update",
@@ -1703,7 +1708,7 @@ async def test_parse_transcript_preview_existing_application_update_preserves_tr
 async def test_parse_transcript_invented_pass2_patch_field_is_discarded_when_not_extracted(client):
     register_known_company("Neilsoft")
     interpreter = FakeInterpreter(
-        extracted_fields={"company": "Neilsoft", "roles": ["AI Engineer"]},
+        extracted_fields={"company": "Neilsoft", "role": "AI Engineer"},
         proposal=proposal(
             tool_name="patch_active_draft",
             arguments={
@@ -1718,7 +1723,7 @@ async def test_parse_transcript_invented_pass2_patch_field_is_discarded_when_not
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["priority"] == ""
 
 
@@ -1745,7 +1750,7 @@ async def test_parse_transcript_patch_active_draft_warns_when_full_time_is_not_u
 
     assert parsed["status"] in {"draft_created", "draft_updated", "saved", "updated"}
     assert parsed["draft"]["company"] == "Neilsoft"
-    assert parsed["draft"]["roles"] == ["AI Engineer"]
+    assert parsed["draft"]["role"] == "AI Engineer"
     assert parsed["draft"]["employment_types"] == ["Full Time"]
     assert parsed["draft"]["current_stages"] == ["Applied"]
     assert parsed["draft"]["status"] == ""
@@ -1833,7 +1838,7 @@ async def test_parse_transcript_attach_latest_browser_context_returns_clarificat
         context={
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": ["AI Engineer"],
+                "role": "AI Engineer",
                 "employment_types": [],
                 "job_link": "",
                 "location": "",
@@ -1899,7 +1904,7 @@ async def test_parse_transcript_request_draft_save_without_draft_id_returns_erro
         context={
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": ["AI Engineer"],
+                "role": "AI Engineer",
                 "employment_types": ["Full Time"],
                 "job_link": "",
                 "location": "onsite",
@@ -1954,7 +1959,7 @@ async def test_parse_transcript_bounded_recent_context_is_sent_to_interpreter(cl
             "active_application": {"application_id": 12},
             "active_draft": {
                 "company": "Neilsoft",
-                "roles": ["RAG Engineer"],
+                "role": "RAG Engineer",
                 "employment_types": [],
                 "job_link": "",
                 "location": "",
@@ -2132,7 +2137,7 @@ async def test_delete_application_preserves_asr_correction_history_and_nulls_app
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2209,37 +2214,37 @@ async def test_delete_application_without_correction_events_still_works(client):
 
 @pytest.mark.anyio
 async def test_open_ended_role_titles_are_accepted(client):
-    payload = REALISTIC_RECORD | {"roles_json": ["Backend Wizard"]}
+    payload = REALISTIC_RECORD | {"role": "Backend Wizard"}
     created = await create_record(client, payload)
-    assert created["roles_json"] == ["Backend Wizard"]
+    assert created["role"] == "Backend Wizard"
 
 
 @pytest.mark.anyio
 async def test_arbitrary_role_string_is_accepted(client):
-    payload = REALISTIC_RECORD | {"roles_json": ["Galactic Overlord Engineer"]}
+    payload = REALISTIC_RECORD | {"role": "Galactic Overlord Engineer"}
     created = await create_record(client, payload)
-    assert created["roles_json"] == ["Galactic Overlord Engineer"]
+    assert created["role"] == "Galactic Overlord Engineer"
 
 
 @pytest.mark.anyio
-async def test_blank_role_string_is_rejected(client):
-    payload = REALISTIC_RECORD | {"roles_json": [""]}
-    response = await client.post("/applications", json=payload)
-    assert response.status_code == 422
+async def test_blank_role_string_is_stored_as_empty(client):
+    payload = REALISTIC_RECORD | {"role": ""}
+    created = await create_record(client, payload)
+    assert created["role"] == ""
 
 
 @pytest.mark.anyio
 async def test_role_with_word_role_in_title_is_stored_correctly(client):
-    payload = REALISTIC_RECORD | {"roles_json": ["Platform Role"]}
+    payload = REALISTIC_RECORD | {"role": "Platform Role"}
     created = await create_record(client, payload)
-    assert created["roles_json"] == ["Platform Role"]
+    assert created["role"] == "Platform Role"
 
 
 @pytest.mark.anyio
-async def test_blank_role_rejection(client):
-    payload = REALISTIC_RECORD | {"roles_json": ["   "]}
-    response = await client.post("/applications", json=payload)
-    assert response.status_code == 422
+async def test_blank_role_normalizes_to_empty_string(client):
+    payload = REALISTIC_RECORD | {"role": "   "}
+    created = await create_record(client, payload)
+    assert created["role"] == ""
 
 
 @pytest.mark.anyio
@@ -2271,10 +2276,10 @@ async def test_invalid_priority_rejection(client):
 
 
 @pytest.mark.anyio
-async def test_multiple_role_values_persist_correctly(client):
-    payload = REALISTIC_RECORD | {"roles_json": ["AI Engineer", "LLM Engineer", "RAG Engineer"]}
+async def test_role_value_persists_correctly(client):
+    payload = REALISTIC_RECORD | {"role": "AI Engineer"}
     created = await create_record(client, payload)
-    assert created["roles_json"] == ["AI Engineer", "LLM Engineer", "RAG Engineer"]
+    assert created["role"] == "AI Engineer"
 
 
 @pytest.mark.anyio
@@ -2360,7 +2365,7 @@ async def test_new_company_create_request_returns_confirmation_required(client):
         client,
         {
             "company": "Crew Trim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2391,7 +2396,7 @@ async def test_confirming_unchanged_new_company_name_creates_application(client)
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Crew Trim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2421,7 +2426,7 @@ async def test_correcting_new_company_name_uses_confirmed_canonical_name(client)
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2453,7 +2458,7 @@ async def test_changed_asr_company_name_becomes_alias_when_meaningfully_differen
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2473,7 +2478,7 @@ async def test_changed_asr_company_name_becomes_alias_when_meaningfully_differen
         client,
         {
             "company": "crew trim labs",
-            "roles_json": ["ML Engineer"],
+            "role": "ML Engineer",
             "employment_types_json": ["Internship"],
             "job_link": "",
             "location": "",
@@ -2497,7 +2502,7 @@ async def test_existing_company_create_path_does_not_trigger_confirmation_popup(
         {
             "company": "Analytics Vidhya",
             "confirmed_company_name": "Analytics Vidhya",
-            "roles_json": ["Generative AI Engineer"],
+            "role": "Generative AI Engineer",
             "employment_types_json": ["Internship"],
             "job_link": "",
             "location": "",
@@ -2516,7 +2521,7 @@ async def test_existing_company_create_path_does_not_trigger_confirmation_popup(
         client,
         {
             "company": " analytics   vidhya ",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2536,7 +2541,7 @@ async def test_existing_company_create_path_does_not_trigger_confirmation_popup(
 def _candidate_payload(company: str, roles: list[str]) -> dict:
     return {
         "company": company,
-        "roles_json": roles,
+        "role": roles[0] if roles else "",
         "employment_types_json": [],
         "job_link": "",
         "location": "",
@@ -2598,7 +2603,7 @@ async def test_alias_lookup_resolves_to_canonical_company(client):
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2617,7 +2622,7 @@ async def test_alias_lookup_resolves_to_canonical_company(client):
         client,
         {
             "company": "Crew-Trim Labs",
-            "roles_json": ["ML Engineer"],
+            "role": "ML Engineer",
             "employment_types_json": ["Part Time"],
             "job_link": "",
             "location": "",
@@ -2642,7 +2647,7 @@ async def test_hotword_list_is_deduplicated_and_bounded(client):
             {
                 "company": f"Company {index}",
                 "confirmed_company_name": f"Company {index}",
-                "roles_json": ["AI Engineer"],
+                "role": "AI Engineer",
                 "employment_types_json": ["Full Time"],
                 "job_link": "",
                 "location": "",
@@ -2672,7 +2677,7 @@ async def test_hotword_list_returns_canonical_name_and_excludes_aliases(client):
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2692,7 +2697,7 @@ async def test_hotword_list_returns_canonical_name_and_excludes_aliases(client):
         {
             "company": "crew   trim   labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Internship"],
             "job_link": "",
             "location": "",
@@ -2722,7 +2727,7 @@ async def test_hotword_list_retains_canonical_company_after_last_application_is_
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2755,7 +2760,7 @@ async def test_hotword_list_ignores_blank_values_and_preserves_static_vocabulary
         {
             "company": "Whitespace Co",
             "confirmed_company_name": "Whitespace Co",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2785,7 +2790,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
         {
             "company": "Krutrim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2805,7 +2810,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
         {
             "company": "Krutrim Labs",
             "confirmed_company_name": "Krutrim Labs!",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2825,7 +2830,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
@@ -2845,7 +2850,7 @@ async def test_alias_hygiene_ignores_blank_normalized_identical_and_duplicate_al
         {
             "company": "crew   trim   labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Internship"],
             "job_link": "",
             "location": "",
@@ -2874,7 +2879,7 @@ async def test_correction_event_is_persisted(client):
         {
             "company": "Crew Trim Labs",
             "confirmed_company_name": "Krutrim Labs",
-            "roles_json": ["AI Engineer"],
+            "role": "AI Engineer",
             "employment_types_json": ["Full Time"],
             "job_link": "",
             "location": "",
