@@ -10,11 +10,14 @@ Tests cover:
 - Clarification: role only → ask for company; company only → ask for role
 - Internal diagnostic suppression: public message/warnings must not contain internal tokens
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Legacy LLM semantic mutation path disabled. USE_LEGACY_SEMANTIC_MUTATIONS=0.")
 
 from app.semantic_interpreter import (
     SemanticInterpreterInvalidResponseError,

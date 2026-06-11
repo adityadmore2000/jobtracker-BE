@@ -190,11 +190,11 @@ def _make_clarification_interpreter(question="Which company?"):
 
 @pytest.mark.anyio
 async def test_transcript_create_draft_returns_draft_created(client):
-    app.dependency_overrides[get_semantic_interpreter] = lambda: _make_patch_active_draft_interpreter()
-    try:
-        response = await client.post("/transcript/parse", json={"transcript": "Applied for AI Engineer at Neilsoft"})
-    finally:
-        app.dependency_overrides.pop(get_semantic_interpreter, None)
+    # Use controlled command syntax; no LLM involved.
+    response = await client.post(
+        "/transcript/parse",
+        json={"transcript": "add application for AI Engineer at Neilsoft"},
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -232,11 +232,8 @@ async def test_transcript_patch_draft_returns_draft_updated(client, db):
 
 @pytest.mark.anyio
 async def test_transcript_clarification_returns_clarification_status(client):
-    app.dependency_overrides[get_semantic_interpreter] = lambda: _make_clarification_interpreter("Which company?")
-    try:
-        response = await client.post("/transcript/parse", json={"transcript": "vague update"})
-    finally:
-        app.dependency_overrides.pop(get_semantic_interpreter, None)
+    # "update application" with no company name triggers clarification from the controlled parser.
+    response = await client.post("/transcript/parse", json={"transcript": "update application"})
 
     assert response.status_code == 200
     body = response.json()

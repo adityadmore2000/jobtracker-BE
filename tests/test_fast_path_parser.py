@@ -162,7 +162,10 @@ async def test_save_it_transcript_bypasses_ollama(client, db):
 
 
 @pytest.mark.anyio
-async def test_unrecognized_transcript_still_calls_ollama(client):
+async def test_unrecognized_transcript_does_not_call_llm(client):
+    """Unrecognised commands must NOT fall through to the LLM mutation pipeline.
+    USE_LEGACY_SEMANTIC_MUTATIONS=0 (default disabled).
+    """
     call_count = {"count": 0}
 
     class TrackingInterpreter:
@@ -188,11 +191,12 @@ async def test_unrecognized_transcript_still_calls_ollama(client):
 
     app.dependency_overrides[get_semantic_interpreter] = lambda: TrackingInterpreter()
     try:
-        await client.post(
+        response = await client.post(
             "/transcript/parse",
             json={"transcript": "Neilsoft sathi AI Engineer application add kar"},
         )
     finally:
         app.dependency_overrides.pop(get_semantic_interpreter, None)
 
-    assert call_count["count"] >= 1, "Ollama interpreter was not called for an unrecognized transcript"
+    assert call_count["count"] == 0, "LLM must NOT be called for unrecognised transcripts"
+    assert response.json()["status"] == "unsupported"

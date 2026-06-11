@@ -66,27 +66,28 @@ class TestCreateDraftParserMatches:
         assert result.changes.company.lower() == expected_company_lower
 
     def test_bare_add(self):
+        # Trailing "role" suffix is stripped in the add-application grammar.
         self._assert_match(
             "add application for AI Engineer role at virtusa software",
-            "ai engineer role", "virtusa software",
+            "ai engineer", "virtusa software",
         )
 
     def test_please_prefix(self):
         self._assert_match(
             "please add application for AI Engineer role at virtusa software",
-            "ai engineer role", "virtusa software",
+            "ai engineer", "virtusa software",
         )
 
     def test_do_me_a_favor_prefix(self):
         self._assert_match(
             "do me a favor, add application for AI Engineer role at virtusa software",
-            "ai engineer role", "virtusa software",
+            "ai engineer", "virtusa software",
         )
 
     def test_hey_can_you_prefix(self):
         self._assert_match(
             "hey, can you add application for AI Engineer role at virtusa software",
-            "ai engineer role", "virtusa software",
+            "ai engineer", "virtusa software",
         )
 
     def test_could_you_please_track(self):

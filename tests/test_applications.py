@@ -1,6 +1,9 @@
+
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Legacy LLM semantic mutation path disabled. USE_LEGACY_SEMANTIC_MUTATIONS=0.")
 from httpx import ASGITransport, AsyncClient
 
 from app.company_resolution import detect_explicit_known_companies

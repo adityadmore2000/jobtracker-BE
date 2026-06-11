@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from .models import JobApplication
-from .public_schemas import PublicApplicationChangeDraftDTO, PublicApplicationDTO, PublicTranscriptResponse
+from .mutation_schemas import MutationResult
+from .public_schemas import (
+    PublicApplicationChangeDraftDTO,
+    PublicApplicationDTO,
+    PublicNoteDTO,
+    PublicTranscriptResponse,
+)
 from .schemas import JobApplicationBase, SemanticTranscriptResponse
 
 
@@ -272,4 +279,135 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
         pending_changes=public_change_draft,
         warnings=list(internal.warnings),
         clarification_question=internal.clarification_question if public_status == "clarification" else None,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Controlled command layer: build response directly from MutationResult
+# ─────────────────────────────────────────────────────────────────────────────
+
+_MUTATION_OP_TO_PUBLIC_STATUS: dict[str, str] = {
+    "create_draft": "draft_created",
+    "draft_updated": "draft_updated",
+    "patch_draft": "draft_updated",
+    "save_draft": "saved",
+    "discard_draft": "discarded",
+    "patch_application": "updated",
+    "updated": "updated",
+    "no_change": "no_change",
+    "ask_clarification": "clarification",
+    "append_note": "note_added",
+    "archive_application": "application_archived",
+    "restore_application": "application_restored",
+    "create_application_update_draft": "pending_changes_created",
+    "patch_application_update_draft": "pending_changes_updated",
+    "apply_application_update_draft": "changes_applied",
+    "discard_application_update_draft": "changes_discarded",
+    "set_active_application": "context_updated",
+}
+
+_DEFAULT_OP_MESSAGES: dict[str, str] = {
+    "draft_created": "Draft created. Review it and save when ready.",
+    "draft_updated": "Draft updated.",
+    "saved": "Application saved.",
+    "discarded": "Draft discarded.",
+    "updated": "Application updated.",
+    "clarification": "Please clarify.",
+    "no_change": "No change was made.",
+    "error": "An error occurred.",
+    "pending_changes_created": "Pending changes created. Review and apply when ready.",
+    "pending_changes_updated": "Pending changes updated.",
+    "changes_applied": "Changes applied.",
+    "changes_discarded": "Pending changes discarded.",
+    "note_added": "Note added.",
+    "application_archived": "Application archived.",
+    "application_restored": "Application restored.",
+    "context_updated": "Application selected.",
+    "unsupported": "I could not identify a tracker command. Please use a supported command such as: set priority as medium.",
+}
+
+
+def mutation_result_to_public_response(
+    result: MutationResult,
+    *,
+    pending_command: dict[str, Any] | None = None,
+) -> PublicTranscriptResponse:
+    """Convert a MutationResult from the controlled command layer to the public response."""
+    public_status = _MUTATION_OP_TO_PUBLIC_STATUS.get(result.operation, "no_change")
+
+    if result.clarification_question:
+        message = result.clarification_question
+    elif not result.success:
+        message = result.message
+    else:
+        message = result.message or _DEFAULT_OP_MESSAGES.get(public_status, "Done.")
+
+    # Build draft DTO
+    public_draft: PublicApplicationDTO | None = None
+    draft_id: str | None = None
+    if result.draft:
+        public_draft = to_public_application(result.draft)
+        if result.draft.get("is_draft") and result.draft.get("id"):
+            draft_id = str(result.draft["id"])
+
+    # Build application DTO
+    public_app: PublicApplicationDTO | None = None
+    application_id: int | None = None
+    if result.application:
+        public_app = to_public_application(result.application)
+        application_id = result.application.get("id")
+
+    # Build note DTO (first note from the result)
+    public_note: PublicNoteDTO | None = None
+    if result.notes:
+        first = result.notes[0]
+        from datetime import datetime as _dt
+        created_raw = first.get("created_at")
+        created_dt = _dt.fromisoformat(created_raw) if isinstance(created_raw, str) else created_raw
+        public_note = PublicNoteDTO(
+            id=first["id"],
+            text=first["text"],
+            created_at=created_dt,
+        )
+
+    # Build change-draft DTO
+    public_change_draft: PublicApplicationChangeDraftDTO | None = None
+    if result.change_draft:
+        public_change_draft = to_public_change_draft(result.change_draft)
+
+    return PublicTranscriptResponse(
+        status=public_status,  # type: ignore[arg-type]
+        message=message,
+        application_id=application_id,
+        draft_id=draft_id,
+        draft=public_draft,
+        application=public_app,
+        pending_changes=public_change_draft,
+        warnings=[],
+        clarification_question=result.clarification_question,
+        note=public_note,
+        pending_command=pending_command,
+    )
+
+
+def unsupported_command_response() -> PublicTranscriptResponse:
+    """Safe response returned when no supported command anchor is recognised."""
+    return PublicTranscriptResponse(
+        status="unsupported",  # type: ignore[arg-type]
+        message=_DEFAULT_OP_MESSAGES["unsupported"],
+        warnings=[],
+    )
+
+
+def clarification_needed_response(
+    question: str,
+    pending_command: dict[str, Any] | None = None,
+) -> PublicTranscriptResponse:
+    """Response returned when the parser found a supported command but needs more info."""
+    return PublicTranscriptResponse(
+        status="clarification",
+        message=question,
+        clarification_question=question,
+        pending_command=pending_command,
+        warnings=[],
     )

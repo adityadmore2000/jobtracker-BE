@@ -32,14 +32,15 @@ _OPERATION_TO_TRANSCRIPT_OP: dict[str, str] = {
     "patch_application": "update",
     "discard_draft": "none",
     "ask_clarification": "none",
-    "append_note": "none",
-    "archive_application": "none",
-    "restore_application": "none",
+    "append_note": "note",
+    "archive_application": "update",
+    "restore_application": "update",
     "delete_application_permanently": "none",
     "create_application_update_draft": "pending_changes",
     "patch_application_update_draft": "pending_changes",
     "apply_application_update_draft": "update",
     "discard_application_update_draft": "none",
+    "set_active_application": "context",
 }
 
 assert set(_OPERATION_TO_TRANSCRIPT_OP.keys()) == ALLOWED_OPERATIONS, (
@@ -557,18 +558,29 @@ def handle_ask_clarification(payload: MutationPayload, db: Session) -> MutationR
 def handle_append_note(payload: MutationPayload, db: Session) -> MutationResult:
     if not payload.notes_to_append:
         return _error("append_note", "notes_to_append must not be empty")
-    if payload.target.application_id is None:
-        return _error("append_note", "application_id is required in target for append_note")
 
-    app = db.get(JobApplication, payload.target.application_id)
-    if app is None:
-        return _error("append_note", f"Application {payload.target.application_id} not found")
-    if app.is_draft:
-        return _error("append_note", "Cannot append notes to a draft application")
+    # Resolve target: prefer application_id, fall back to draft_id.
+    # Draft notes are allowed and cascade-deleted when the draft is discarded.
+    if payload.target.application_id is not None:
+        app = db.get(JobApplication, payload.target.application_id)
+        if app is None:
+            return _error("append_note", f"Application {payload.target.application_id} not found")
+    elif payload.target.draft_id is not None:
+        try:
+            draft_id = int(payload.target.draft_id)
+        except (ValueError, TypeError):
+            return _error("append_note", f"Invalid draft_id '{payload.target.draft_id}'")
+        app = db.get(JobApplication, draft_id)
+        if app is None or not app.is_draft:
+            return _error("append_note", f"Draft {payload.target.draft_id} not found")
+    else:
+        return _error("append_note", "application_id or draft_id is required in target for append_note")
 
     created_notes = _append_notes(app.id, payload.notes_to_append, db)
-    for note in created_notes:
-        _append_event(app.id, "note_added", {"text": note.text}, db)
+    # Only log note_added events for saved (non-draft) applications.
+    if not app.is_draft:
+        for note in created_notes:
+            _append_event(app.id, "note_added", {"text": note.text}, db)
     db.commit()
     for note in created_notes:
         db.refresh(note)
@@ -576,8 +588,30 @@ def handle_append_note(payload: MutationPayload, db: Session) -> MutationResult:
     return MutationResult(
         success=True,
         operation="append_note",
-        message="Notes appended.",
+        message="Note added.",
+        draft=_application_to_dict(app) if app.is_draft else None,
+        application=_application_to_dict(app) if not app.is_draft else None,
         notes=[_note_to_dict(n) for n in created_notes],
+    )
+
+
+def handle_set_active_application(payload: MutationPayload, db: Session) -> MutationResult:
+    """Context-selection sentinel. Returns the application so the frontend can set context.
+
+    No DB mutation is performed. The operation tells the frontend to update
+    its selected-application state so subsequent field-setter commands route
+    to the correct row.
+    """
+    if payload.target.application_id is None:
+        return _error("set_active_application", "application_id is required")
+    app = db.get(JobApplication, payload.target.application_id)
+    if app is None:
+        return _error("set_active_application", f"Application {payload.target.application_id} not found")
+    return MutationResult(
+        success=True,
+        operation="set_active_application",
+        message=f"Now updating {app.company}{' — ' + app.role if app.role else ''}. Use set commands to stage changes.",
+        application=_application_to_dict(app),
     )
 
 
@@ -986,5 +1020,6 @@ def dispatch(payload: MutationPayload, db: Session) -> MutationResult:
         "patch_application_update_draft": handle_patch_application_update_draft,
         "apply_application_update_draft": handle_apply_application_update_draft,
         "discard_application_update_draft": handle_discard_application_update_draft,
+        "set_active_application": handle_set_active_application,
     }
     return handlers[payload.operation](payload, db)

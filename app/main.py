@@ -34,7 +34,14 @@ from .mutation_dispatcher import dispatch
 from .mutation_schemas import MutationPayload, MutationTarget, ApplicationChanges
 from .public_schemas import PublicApplicationChangeDraftDTO, PublicApplicationDTO, PublicTranscriptResponse
 from .role_resolution import find_application_by_company_role, normalize_role_name
-from .transcript_response_adapter import to_public_application, to_public_change_draft, to_public_transcript_response
+from .transcript_response_adapter import (
+    clarification_needed_response,
+    mutation_result_to_public_response,
+    to_public_application,
+    to_public_change_draft,
+    to_public_transcript_response,
+    unsupported_command_response,
+)
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
     ApplicationCreateCandidateRequest,
@@ -51,6 +58,7 @@ from .schemas import (
     SemanticTranscriptResponse,
     TranscriptParseRequest,
 )
+from .fast_path_parser import ClarificationNeeded, ParseMiss, try_parse_v2
 from .semantic_interpreter import OllamaSemanticInterpreter, get_semantic_interpreter
 from .semantic_validation import interpret_transcript_command
 
@@ -408,14 +416,56 @@ async def get_latest_browser_context(db: Session = Depends(get_db)) -> dict[str,
     return {"context": context}
 
 
+def _build_applications_list(db: Session) -> list[dict]:
+    """Return active + archived applications as plain dicts for parser context."""
+    apps = (
+        db.query(JobApplication)
+        .filter(JobApplication.is_draft == False)  # noqa: E712
+        .all()
+    )
+    result = []
+    for a in apps:
+        result.append({
+            "id": a.id,
+            "company": a.company,
+            "role": a.role or "",
+            "archived_at": a.archived_at.isoformat() if a.archived_at else None,
+        })
+    return result
+
+
 @app.post("/transcript/parse", response_model=PublicTranscriptResponse)
 async def parse_transcript_command(
     payload: TranscriptParseRequest,
     db: Session = Depends(get_db),
     interpreter: OllamaSemanticInterpreter = Depends(get_semantic_interpreter),
 ) -> PublicTranscriptResponse:
-    internal = interpret_transcript_command(db, payload, interpreter)
-    return to_public_transcript_response(internal)
+    # Build parser context, injecting the applications list for company resolution.
+    raw_context = payload.context or {}
+    applications_list = _build_applications_list(db)
+    parser_context = dict(raw_context)
+    parser_context["applications"] = applications_list
+
+    # Controlled parser: try_parse_v2 must run first.
+    # It returns MutationPayload (dispatch), ClarificationNeeded (surface question),
+    # or ParseMiss (no supported anchor — block mutation LLM path).
+    controlled_result = try_parse_v2(payload.transcript, parser_context)
+
+    if isinstance(controlled_result, MutationPayload):
+        mutation_result = dispatch(controlled_result, db)
+        return mutation_result_to_public_response(mutation_result)
+
+    if isinstance(controlled_result, ClarificationNeeded):
+        return clarification_needed_response(
+            controlled_result.question,
+            controlled_result.pending_command or None,
+        )
+
+    # ParseMiss: no supported command anchor found.
+    # The legacy LLM pipeline is intentionally NOT called for mutations.
+    # USE_LEGACY_SEMANTIC_MUTATIONS=0 (default disabled).
+    assert isinstance(controlled_result, ParseMiss)
+    return unsupported_command_response()
 
 
 @app.post("/applications", response_model=JobApplicationRead, status_code=status.HTTP_201_CREATED)

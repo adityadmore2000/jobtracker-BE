@@ -19,7 +19,7 @@ from .constants import (
     normalize_status_value,
 )
 from .models import BrowserContext, JobApplication
-from .fast_path_parser import try_parse
+from .fast_path_parser import ClarificationNeeded, ParseMiss, try_parse, try_parse_v2
 from .mutation_dispatcher import dispatch
 from .mutation_schemas import ApplicationChanges, MutationPayload, MutationResult, MutationTarget
 from .schemas import JobApplicationCreate, SemanticTranscriptResponse, TranscriptParseRequest
@@ -59,6 +59,23 @@ _LIFECYCLE_INTENT_PATTERNS: list[re.Pattern] = [
 def _has_lifecycle_intent(transcript: str) -> bool:
     """Return True when the transcript expresses a draft or app lifecycle intent."""
     return any(p.search(transcript) for p in _LIFECYCLE_INTENT_PATTERNS)
+
+
+# Explicit note-command anchors. Only exact command-phrase anchors are listed —
+# no fuzzy free-text matching. Used solely to block the active-draft contextual
+# patch fallback from synthesising patch_draft with hallucinated note text.
+# Negative lookahead on `for` excludes "add note for [company]" which is a
+# saved-application comment command that belongs to the LLM pipeline.
+_NOTE_INTENT_PATTERNS: list[re.Pattern] = [
+    re.compile(r'\badd\s+a?\s*note\b(?!\s+for\b)', re.IGNORECASE),
+    re.compile(r'\bappend\s+a?\s*note\b', re.IGNORECASE),
+    re.compile(r'\bnote\s+that\b', re.IGNORECASE),
+]
+
+
+def _has_note_intent(transcript: str) -> bool:
+    """Return True when the transcript contains an explicit note-command anchor."""
+    return any(p.search(transcript) for p in _NOTE_INTENT_PATTERNS)
 
 
 # Explicit create-intent cues — generic verb/noun phrases that signal a new application.
@@ -2128,6 +2145,17 @@ def interpret_transcript_command(
             payload,
             proposal,
         )
+
+    # Note-intent guard: block before the LLM pipeline runs.
+    # The LLM has no note tool — it hallucinates note text into role/comments
+    # and the active-draft fallback would corrupt the draft.  Reject early with
+    # a safe, informative message rather than letting any LLM path fire.
+    if _has_note_intent(payload.transcript):
+        return unsupported_response(
+            payload,
+            ["Could not add that note safely. No tracker changes were saved."],
+        )
+
     # OLLAMA_MAX_TOOL_TURNS caps how many times interpret() may run for one transcript
     # request (initial call plus any clarification/schema-repair retries). Default is 2.
     max_tool_turns = max(1, interpreter.settings.max_tool_turns)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -38,6 +38,36 @@ class PublicApplicationChangeDraftDTO(BaseModel):
     updated_at: datetime
 
 
+class PublicNoteDTO(BaseModel):
+    id: int
+    text: str
+    created_at: datetime | None
+
+
+# pending_command shape echoed back to the frontend for clarification continuation.
+class PendingCommandTarget(BaseModel, extra="forbid"):
+    company: str | None = None
+    role: str | None = None
+    application_id: int | None = None
+
+
+class PendingCommand(BaseModel, extra="forbid"):
+    operation: Literal[
+        "remove_application",
+        "update_application",
+        "append_note",
+        "set_role",
+        "set_priority",
+        "set_location",
+        "set_employment_type",
+        "set_current_stages",
+    ]
+    target: PendingCommandTarget
+    changes: dict[str, Any]
+    note: str | None = None
+    missing_field: Literal["company", "role"] | None = None
+
+
 TranscriptStatus = Literal[
     "draft_created",
     "draft_updated",
@@ -51,6 +81,11 @@ TranscriptStatus = Literal[
     "pending_changes_updated",
     "changes_applied",
     "changes_discarded",
+    "note_added",
+    "application_archived",
+    "application_restored",
+    "context_updated",
+    "unsupported",
 ]
 
 
@@ -64,3 +99,6 @@ class PublicTranscriptResponse(BaseModel):
     pending_changes: PublicApplicationChangeDraftDTO | None = None
     warnings: list[str] = []
     clarification_question: str | None = None
+    # New fields for controlled command layer
+    note: PublicNoteDTO | None = None
+    pending_command: dict[str, Any] | None = None

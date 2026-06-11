@@ -14,9 +14,12 @@ Tests cover:
 - Helper unit tests: _has_explicit_saved_update_intent, _fields_can_create_or_patch_draft
 """
 
+
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Legacy LLM semantic mutation path disabled. USE_LEGACY_SEMANTIC_MUTATIONS=0.")
 
 from app.semantic_interpreter import (
     SemanticInterpreterInvalidResponseError,

@@ -18,6 +18,9 @@ ALLOWED_OPERATIONS = {
     "patch_application_update_draft",
     "apply_application_update_draft",
     "discard_application_update_draft",
+    # Context-selection sentinel: sets active_application_id on the frontend.
+    # The backend simply returns the resolved application; no DB mutation occurs.
+    "set_active_application",
 }
 
 

@@ -160,14 +160,11 @@ async def test_draft_id_returned_in_transcript_response(client):
         def health_check(self):
             return {}
 
-    app.dependency_overrides[get_semantic_interpreter] = lambda: FakeInterpreter()
-    try:
-        response = await client.post(
-            "/transcript/parse",
-            json={"transcript": "Add NewCo AI Engineer"},
-        )
-    finally:
-        app.dependency_overrides.pop(get_semantic_interpreter, None)
+    # Use controlled command syntax; LLM path is intentionally disabled.
+    response = await client.post(
+        "/transcript/parse",
+        json={"transcript": "add application for AI Engineer at NewCo"},
+    )
 
     assert response.status_code == 200
     body = response.json()

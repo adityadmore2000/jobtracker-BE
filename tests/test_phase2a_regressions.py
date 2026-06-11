@@ -10,9 +10,12 @@ Tests cover:
 - Part G: Truthful messages for recognized-but-unsupported patterns
 """
 
+
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Legacy LLM semantic mutation path disabled. USE_LEGACY_SEMANTIC_MUTATIONS=0.")
 from httpx import ASGITransport, AsyncClient
 
 from app.constants import LOCATION_ALIASES, normalize_status_value

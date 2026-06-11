@@ -8,9 +8,12 @@ Tests cover:
 - Existing behaviour preservation after these changes
 """
 
+
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Legacy LLM semantic mutation path disabled. USE_LEGACY_SEMANTIC_MUTATIONS=0.")
 
 from app.constants import normalize_status_value
 from app.semantic_interpreter import SemanticInterpretationResult

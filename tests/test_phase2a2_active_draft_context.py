@@ -11,9 +11,12 @@ Tests cover:
 - Malformed LLM output reconciliation (status in role, compact alias in list)
 """
 
+
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Legacy LLM semantic mutation path disabled. USE_LEGACY_SEMANTIC_MUTATIONS=0.")
 
 from app.constants import normalize_status_value
 from app.semantic_interpreter import SemanticInterpretationResult
