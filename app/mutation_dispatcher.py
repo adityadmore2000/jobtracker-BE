@@ -18,6 +18,7 @@ from .role_resolution import find_application_by_company_role, normalize_role_na
 from .mutation_schemas import (
     ALLOWED_OPERATIONS,
     ApplicationChanges,
+    CollisionInfo,
     MutationPayload,
     MutationResult,
     MutationTarget,
@@ -214,15 +215,32 @@ def _handle_reapply(existing: JobApplication, requested_status: str, operation: 
     """
     if existing.is_draft:
         db.refresh(existing)
+        company_name = existing.company_rel.name if existing.company_rel else existing.company
         return MutationResult(
             success=True,
             operation="draft_updated",
-            message="An existing draft for this company and role already exists.",
+            message=f"A draft already exists for {company_name} · {existing.role}.",
             draft=_application_to_dict(existing),
+            collision=CollisionInfo(
+                kind="draft",
+                draft_id=existing.id,
+                company=company_name,
+                role=existing.role,
+                archived=False,
+            ),
         )
 
     # Saved row (may be archived).
     current_status = existing.status
+    company_name = existing.company_rel.name if existing.company_rel else existing.company
+    is_archived = existing.archived_at is not None
+    collision = CollisionInfo(
+        kind="archived_application" if is_archived else "active_application",
+        application_id=existing.id,
+        company=company_name,
+        role=existing.role,
+        archived=is_archived,
+    )
 
     if current_status == "accepted":
         return MutationResult(
@@ -233,14 +251,16 @@ def _handle_reapply(existing: JobApplication, requested_status: str, operation: 
                 f"This application is currently marked as accepted. "
                 f"Do you want to change it to applied?"
             ),
+            collision=collision,
         )
 
     if current_status == "applied" and existing.archived_at is None:
         return MutationResult(
             success=True,
             operation="no_change",
-            message="Application already exists and is marked as applied.",
+            message=f"An application already exists for {company_name} · {existing.role}.",
             application=_application_to_dict(existing),
+            collision=collision,
         )
 
     # For all other states (rejected, in_touch, empty) — or archived — reapply.
@@ -267,6 +287,7 @@ def _handle_reapply(existing: JobApplication, requested_status: str, operation: 
         operation="updated",
         message=message,
         application=_application_to_dict(existing),
+        collision=collision,
     )
 
 

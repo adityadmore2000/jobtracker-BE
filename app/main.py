@@ -385,6 +385,22 @@ async def list_archived_applications(db: Session = Depends(get_db)) -> list[Publ
     return [to_public_application(row) for row in rows]
 
 
+@app.get("/drafts", response_model=list[PublicApplicationDTO])
+async def list_drafts(db: Session = Depends(get_db)) -> list[PublicApplicationDTO]:
+    """Return persisted draft rows only (is_draft = true).
+
+    Surfaces orphaned drafts so the UI can open, save, or discard them — and so
+    a draft no longer creates an invisible uniqueness deadlock.
+    """
+    rows = (
+        db.query(JobApplication)
+        .filter(JobApplication.is_draft == True)  # noqa: E712
+        .order_by(JobApplication.draft_created_at.desc().nullslast(), JobApplication.id.desc())
+        .all()
+    )
+    return [to_public_application(row) for row in rows]
+
+
 @app.get("/applications", response_model=list[PublicApplicationDTO])
 async def list_applications(db: Session = Depends(get_db)) -> list[PublicApplicationDTO]:
     rows = (

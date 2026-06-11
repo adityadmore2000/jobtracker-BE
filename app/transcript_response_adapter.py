@@ -8,6 +8,7 @@ from .mutation_schemas import MutationResult
 from .public_schemas import (
     PublicApplicationChangeDraftDTO,
     PublicApplicationDTO,
+    PublicCollisionDTO,
     PublicNoteDTO,
     PublicTranscriptResponse,
 )
@@ -375,6 +376,17 @@ def mutation_result_to_public_response(
     if result.change_draft:
         public_change_draft = to_public_change_draft(result.change_draft)
 
+    public_collision: PublicCollisionDTO | None = None
+    if result.collision is not None:
+        public_collision = PublicCollisionDTO(
+            kind=result.collision.kind,  # type: ignore[arg-type]
+            draft_id=result.collision.draft_id,
+            application_id=result.collision.application_id,
+            company=result.collision.company,
+            role=result.collision.role,
+            archived=result.collision.archived,
+        )
+
     return PublicTranscriptResponse(
         status=public_status,  # type: ignore[arg-type]
         message=message,
@@ -387,6 +399,7 @@ def mutation_result_to_public_response(
         clarification_question=result.clarification_question,
         note=public_note,
         pending_command=pending_command,
+        collision=public_collision,
     )
 
 

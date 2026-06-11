@@ -51,6 +51,20 @@ class MutationPayload(BaseModel):
     notes_to_append: List[str] = []
 
 
+class CollisionInfo(BaseModel):
+    """Structured metadata describing an existing row a create command collided with.
+
+    kind ∈ {"draft", "active_application", "archived_application"} — lets the
+    frontend offer the right recovery action (open / discard / restore / select).
+    """
+    kind: str
+    draft_id: Optional[int] = None
+    application_id: Optional[int] = None
+    company: Optional[str] = None
+    role: Optional[str] = None
+    archived: bool = False
+
+
 class MutationResult(BaseModel):
     success: bool
     operation: str
@@ -63,3 +77,4 @@ class MutationResult(BaseModel):
     confirmation_kind: Optional[str] = None
     clarification_question: Optional[str] = None
     notes: Optional[List[dict]] = None
+    collision: Optional[CollisionInfo] = None
