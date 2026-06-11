@@ -8,6 +8,7 @@ from .mutation_schemas import MutationResult
 from .public_schemas import (
     PublicApplicationChangeDraftDTO,
     PublicApplicationDTO,
+    PublicCollisionDTO,
     PublicNoteDTO,
     PublicTranscriptResponse,
 )
@@ -375,6 +376,17 @@ def mutation_result_to_public_response(
     if result.change_draft:
         public_change_draft = to_public_change_draft(result.change_draft)
 
+    public_collision: PublicCollisionDTO | None = None
+    if result.collision is not None:
+        public_collision = PublicCollisionDTO(
+            kind=result.collision.kind,  # type: ignore[arg-type]
+            draft_id=result.collision.draft_id,
+            application_id=result.collision.application_id,
+            company=result.collision.company,
+            role=result.collision.role,
+            archived=result.collision.archived,
+        )
+
     return PublicTranscriptResponse(
         status=public_status,  # type: ignore[arg-type]
         message=message,
@@ -387,6 +399,7 @@ def mutation_result_to_public_response(
         clarification_question=result.clarification_question,
         note=public_note,
         pending_command=pending_command,
+        collision=public_collision,
     )
 
 
@@ -409,5 +422,33 @@ def clarification_needed_response(
         message=question,
         clarification_question=question,
         pending_command=pending_command,
+        warnings=[],
+    )
+
+
+def suggestion_only_response(
+    message: str,
+    *,
+    clarification_question: str | None = None,
+    suggested_phrasings: list[str] | None = None,
+) -> PublicTranscriptResponse:
+    """Safe no-mutation response that offers clickable rephrasings.
+
+    Uses the ``unsupported`` status so the frontend never treats it as a mutation.
+    """
+    return PublicTranscriptResponse(
+        status="unsupported",
+        message=message,
+        clarification_question=clarification_question,
+        suggested_phrasings=suggested_phrasings or [],
+        warnings=[],
+    )
+
+
+def mixed_intent_response(message: str) -> PublicTranscriptResponse:
+    """Safe no-mutation response for a transcript that mixes a field update and a note."""
+    return PublicTranscriptResponse(
+        status="unsupported",
+        message=message,
         warnings=[],
     )
