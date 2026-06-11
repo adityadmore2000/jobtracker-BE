@@ -56,7 +56,8 @@ STATUS_OPTIONS = [
 # Keys use space as the only separator (hyphens/underscores are normalised
 # to spaces before lookup by normalize_status_value).
 STATUS_ALIASES: dict[str, str] = {
-    "in touch": "in_touch",  # covers "in-touch" and "in_touch" after sep normalisation
+    "in touch": "in_touch",  # covers "in-touch", "in_touch", "intouch" after sep normalisation
+    "intouch": "in_touch",
     "applied": "applied",
     "submitted application": "applied",
     "application sent": "applied",

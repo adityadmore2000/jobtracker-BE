@@ -320,6 +320,7 @@ class SemanticTranscriptResponse(BaseModel):
     application_id: int | None = None
     draft_id: str | None = None
     draft: JobApplicationBase | None = None
+    draft_dict: dict | None = None  # persisted draft row dict — used for id-accurate public DTO
     drafts: list[JobApplicationCreate] = Field(default_factory=list)
     change_draft: dict | None = None
     warnings: list[str] = Field(default_factory=list)

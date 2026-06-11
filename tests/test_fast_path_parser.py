@@ -63,7 +63,8 @@ def test_priority_high_with_draft_context():
 def test_priority_high_with_application_context():
     result = try_parse("priority high", {"active_application_id": 5})
     assert result is not None
-    assert result.operation == "patch_application"
+    # Saved-application context routes to pending-changes, not a direct patch
+    assert result.operation == "create_application_update_draft"
     assert result.target.application_id == 5
     assert result.changes.priority == "HIGH"
 

@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 import re
+from typing import Literal
 
 from sqlalchemy.orm import Session
 from pydantic import ValidationError
@@ -43,6 +46,65 @@ MAX_RECENT_ACTIONS = 3
 
 CLARIFICATION_MISSING_COMPANY = "Which company should I use?"
 
+# Lifecycle verbs that must never be absorbed by the active-draft contextual patch fallback.
+# Matched case-insensitively against the whole transcript.
+_LIFECYCLE_INTENT_PATTERNS: list[re.Pattern] = [
+    re.compile(r'\b(save|submit)\b', re.IGNORECASE),
+    re.compile(r'\b(discard|cancel|drop|remove|delete)\b', re.IGNORECASE),
+    re.compile(r'\b(archive|restore)\b', re.IGNORECASE),
+    re.compile(r'\bpermanently\s+delete\b', re.IGNORECASE),
+]
+
+
+def _has_lifecycle_intent(transcript: str) -> bool:
+    """Return True when the transcript expresses a draft or app lifecycle intent."""
+    return any(p.search(transcript) for p in _LIFECYCLE_INTENT_PATTERNS)
+
+
+# Explicit create-intent cues — generic verb/noun phrases that signal a new application.
+# Must win over saved-row update detection.
+_EXPLICIT_CREATE_INTENT_PATTERNS: list[re.Pattern] = [
+    re.compile(r'\badd\s+(?:an?\s+)?application\b', re.IGNORECASE),
+    re.compile(r'\bcreate\s+(?:an?\s+)?application\b', re.IGNORECASE),
+    re.compile(r'\bnew\s+application\b', re.IGNORECASE),
+    re.compile(r'\bapplied\s+for\b', re.IGNORECASE),
+    re.compile(r'\bapply\s+for\b', re.IGNORECASE),
+    re.compile(r'\badd\s+(?:a\s+)?job\s+application\b', re.IGNORECASE),
+    re.compile(r'\btrack\s+(?:an?\s+)?application\b', re.IGNORECASE),
+    re.compile(r'\btrack\s+(?:this|my)\b', re.IGNORECASE),
+]
+
+
+def _has_explicit_create_intent(transcript: str) -> bool:
+    """Return True when the transcript explicitly requests creating a new application draft."""
+    return any(p.search(transcript) for p in _EXPLICIT_CREATE_INTENT_PATTERNS)
+
+
+# Cues that indicate the user is asking to update an already-persisted saved row,
+# not create or patch a new draft.  Conservative list — avoid false positives.
+# NOTE: these must NOT fire when explicit create intent is also present.
+_SAVED_UPDATE_INTENT_PATTERNS: list[re.Pattern] = [
+    re.compile(r'\bupdate\s+status\s+of\b', re.IGNORECASE),
+    re.compile(r'\bchange\s+status\s+of\b', re.IGNORECASE),
+    re.compile(r'\bset\s+(?:priority|status|location)\s+of\b', re.IGNORECASE),
+    re.compile(r'\bupdate\s+(?:priority|location|role|employment|stage)\s+of\b', re.IGNORECASE),
+]
+
+
+def _has_explicit_saved_update_intent(transcript: str) -> bool:
+    """Return True when the transcript clearly targets an existing saved row for update.
+
+    Explicit create intent always overrides saved-update intent.
+    """
+    if _has_explicit_create_intent(transcript):
+        return False
+    return any(p.search(transcript) for p in _SAVED_UPDATE_INTENT_PATTERNS)
+
+
+def _fields_can_create_or_patch_draft(fields: "SemanticFieldPatch") -> bool:
+    """Return True when validated fields contain enough to meaningfully create or patch a draft."""
+    return fields_have_values(fields, allow_company=True)
+
 
 def build_transcript_response_from_mutation(
     mutation_result: MutationResult,
@@ -78,9 +140,12 @@ def build_transcript_response_from_mutation(
         )
     operation_map = {
         "create_draft": "create",
+        "draft_updated": "create",  # reused existing draft
         "patch_draft": "create",
         "save_draft": "create",
         "patch_application": "update",
+        "updated": "update",        # reapply semantics updated a saved row
+        "no_change": "none",        # truthful no-op from reapply
         "discard_draft": "none",
         "ask_clarification": "none",
         "append_note": "none",
@@ -93,11 +158,14 @@ def build_transcript_response_from_mutation(
     }
     op = operation_map.get(mutation_result.operation, "none")
     effective_draft = draft
-    if mutation_result.draft and effective_draft is None:
-        try:
-            effective_draft = JobApplicationCreate.model_validate(mutation_result.draft)
-        except Exception:
-            effective_draft = None
+    effective_draft_dict: dict | None = None
+    if mutation_result.draft:
+        effective_draft_dict = mutation_result.draft
+        if effective_draft is None:
+            try:
+                effective_draft = JobApplicationCreate.model_validate(mutation_result.draft)
+            except Exception:
+                effective_draft = None
     # Extract draft_id from mutation result (from DB row) or use the one passed in
     effective_draft_id = draft_id
     if effective_draft_id is None and mutation_result.draft and isinstance(mutation_result.draft.get("id"), int):
@@ -112,6 +180,7 @@ def build_transcript_response_from_mutation(
         raw_transcript=payload.transcript,
         proposal=proposal,
         draft=effective_draft,
+        draft_dict=effective_draft_dict,
         draft_id=effective_draft_id,
         change_draft=mutation_result.change_draft,
         warnings=warnings or [],
@@ -764,8 +833,7 @@ def handle_patch_active_draft(
         )
 
     warnings.extend(draft_warnings)
-    for note in arguments.context_notes:
-        warnings.append(f"Context note: {note}")
+    # context_notes are internal implementation metadata — never expose them to the user
     final_confirmation_kind = draft_confirmation_kind if draft_confirmation_kind != "none" else confirmation_kind
 
     incoming_draft_id = context.get("draft_id")
@@ -794,6 +862,16 @@ def handle_patch_active_draft(
         ),
     )
     mutation_result = dispatch(mutation_payload, db)
+    # Truthful no-op: dispatcher signals that no field actually changed.
+    if mutation_result.operation == "no_change":
+        return SemanticTranscriptResponse(
+            status="unsupported",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=proposal,
+            warnings=[mutation_result.message],
+            interpreter_metrics=metrics,
+        )
     effective_draft_id = str(mutation_result.draft["id"]) if mutation_result.draft and isinstance(mutation_result.draft.get("id"), int) else incoming_draft_id
     return build_transcript_response_from_mutation(
         mutation_result,
@@ -1451,6 +1529,126 @@ def normalize_patch_active_draft_argument_shape(proposal: SemanticToolCallPropos
     return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
 
 
+def canonicalize_tool_arguments(
+    *,
+    tool_name: str,
+    raw_arguments: object,
+) -> dict[str, object]:
+    """Unwrap known LLM tool-call envelope variations into a canonical argument dict.
+
+    Supported shapes:
+      1. Already canonical: {"fields": {...}, ...}
+      2. args envelope:     {"function": tool_name, "args": {"fields": {...}}}
+      3. arguments envelope:{"name": tool_name, "arguments": {"fields": {...}}}
+      4. Duplicate (envelope + canonical keys present with same values): keep canonical.
+
+    Raises SemanticInterpreterInvalidResponseError when:
+    - raw_arguments is not a dict
+    - An envelope is present but wraps a non-dict payload
+    - Conflicting values between envelope and top-level canonical keys
+    """
+    if not isinstance(raw_arguments, dict):
+        raise SemanticInterpreterInvalidResponseError(
+            f"Tool arguments must be an object, got {type(raw_arguments).__name__}."
+        )
+
+    args: dict[str, object] = dict(raw_arguments)
+
+    # Detect which envelope variation is present
+    has_args_envelope = "args" in args and isinstance(args.get("function"), str)
+    has_arguments_envelope = "arguments" in args and isinstance(args.get("name"), str)
+    # Legacy llama envelope: {"function": tool, "parameters": {...}, ...top-level fields...}
+    has_parameters_envelope = (
+        "parameters" in args
+        and isinstance(args.get("function"), str)
+        and not has_args_envelope
+    )
+
+    if has_args_envelope:
+        function_val = args["function"]
+        inner = args["args"]
+        if not isinstance(inner, dict):
+            raise SemanticInterpreterInvalidResponseError(
+                f"Tool call envelope 'args' must be an object, got {type(inner).__name__}."
+            )
+        if function_val != tool_name:
+            # Mismatched function name — still unwrap but log discrepancy; caller decides
+            logger.warning(
+                "canonicalize_tool_arguments_function_mismatch envelope_function=%r selected_tool=%r",
+                function_val,
+                tool_name,
+            )
+        # Build canonical from inner; check for conflicts with any top-level canonical keys
+        envelope_keys = {"function", "args"}
+        top_level_canonical = {k: v for k, v in args.items() if k not in envelope_keys}
+        if top_level_canonical:
+            # Shape 4: duplicate — verify they agree, then keep top-level
+            for key, top_val in top_level_canonical.items():
+                inner_val = inner.get(key)
+                if inner_val is not None and inner_val != top_val:
+                    raise SemanticInterpreterInvalidResponseError(
+                        f"Conflicting values for '{key}' between envelope 'args' and top-level arguments."
+                    )
+            return top_level_canonical
+        return dict(inner)
+
+    if has_arguments_envelope:
+        name_val = args["name"]
+        inner = args["arguments"]
+        if not isinstance(inner, dict):
+            raise SemanticInterpreterInvalidResponseError(
+                f"Tool call envelope 'arguments' must be an object, got {type(inner).__name__}."
+            )
+        if name_val != tool_name:
+            logger.warning(
+                "canonicalize_tool_arguments_name_mismatch envelope_name=%r selected_tool=%r",
+                name_val,
+                tool_name,
+            )
+        envelope_keys = {"name", "arguments"}
+        top_level_canonical = {k: v for k, v in args.items() if k not in envelope_keys}
+        if top_level_canonical:
+            for key, top_val in top_level_canonical.items():
+                inner_val = inner.get(key)
+                if inner_val is not None and inner_val != top_val:
+                    raise SemanticInterpreterInvalidResponseError(
+                        f"Conflicting values for '{key}' between envelope 'arguments' and top-level arguments."
+                    )
+            return top_level_canonical
+        return dict(inner)
+
+    if has_parameters_envelope:
+        function_val = args["function"]
+        inner = args["parameters"]
+        if not isinstance(inner, dict):
+            raise SemanticInterpreterInvalidResponseError(
+                f"Tool call envelope 'parameters' must be an object, got {type(inner).__name__}."
+            )
+        if function_val != tool_name:
+            logger.warning(
+                "canonicalize_tool_arguments_function_mismatch envelope_function=%r selected_tool=%r",
+                function_val,
+                tool_name,
+            )
+        envelope_keys = {"function", "parameters"}
+        top_level_canonical = {k: v for k, v in args.items() if k not in envelope_keys}
+        if top_level_canonical:
+            # Shape 4 variant: duplicate — merge, checking for conflicts
+            merged = dict(inner)
+            for key, top_val in top_level_canonical.items():
+                inner_val = inner.get(key)
+                if inner_val is not None and inner_val != top_val:
+                    raise SemanticInterpreterInvalidResponseError(
+                        f"Conflicting values for '{key}' between envelope 'parameters' and top-level arguments."
+                    )
+                merged[key] = top_val
+            return merged
+        return dict(inner)
+
+    # Shape 1: already canonical
+    return args
+
+
 def _safe_extracted_field_log(fields: dict[str, object]) -> dict[str, object]:
     safe_payload: dict[str, object] = {}
     for key, value in fields.items():
@@ -1507,8 +1705,24 @@ def merge_extracted_fields_into_proposal(
         return proposal
 
     if proposal.tool_name == "patch_active_draft":
-        arguments = dict(proposal.arguments)
-        fields = dict(arguments.get("fields") or {})
+        # Canonicalize envelope before reading fields (handles wrapper shapes from LLM)
+        try:
+            canonical_args = canonicalize_tool_arguments(
+                tool_name=proposal.tool_name,
+                raw_arguments=proposal.arguments,
+            )
+        except SemanticInterpreterInvalidResponseError:
+            canonical_args = dict(proposal.arguments)
+        arguments = dict(canonical_args)
+        raw_fields = arguments.get("fields")
+        if raw_fields is None:
+            fields = {}
+        elif isinstance(raw_fields, dict):
+            fields = dict(raw_fields)
+        else:
+            raise SemanticInterpreterInvalidResponseError(
+                f"Tool fields must be an object, got {type(raw_fields).__name__}."
+            )
         merged_fields = dict(extracted_payload)
 
         if "company" not in merged_fields:
@@ -1546,9 +1760,26 @@ def merge_extracted_fields_into_proposal(
         return SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=arguments)
 
     if proposal.tool_name == "preview_existing_application_update":
-        arguments = dict(proposal.arguments)
-        target = dict(arguments.get("target") or {})
-        fields = dict(arguments.get("fields") or {})
+        try:
+            canonical_args = canonicalize_tool_arguments(
+                tool_name=proposal.tool_name,
+                raw_arguments=proposal.arguments,
+            )
+        except SemanticInterpreterInvalidResponseError:
+            canonical_args = dict(proposal.arguments)
+        arguments = dict(canonical_args)
+        raw_target = arguments.get("target")
+        raw_fields = arguments.get("fields")
+        if raw_target is not None and not isinstance(raw_target, dict):
+            raise SemanticInterpreterInvalidResponseError(
+                f"Tool target must be an object, got {type(raw_target).__name__}."
+            )
+        if raw_fields is not None and not isinstance(raw_fields, dict):
+            raise SemanticInterpreterInvalidResponseError(
+                f"Tool fields must be an object, got {type(raw_fields).__name__}."
+            )
+        target = dict(raw_target) if isinstance(raw_target, dict) else {}
+        fields = dict(raw_fields) if isinstance(raw_fields, dict) else {}
         merged_fields = {key: value for key, value in extracted_payload.items() if key != "company"}
 
         extracted_company = extracted_payload.get("company")
@@ -1589,6 +1820,21 @@ def merge_extracted_fields_into_proposal(
 
 
 def validate_tool_arguments_with_safe_normalization(proposal: SemanticToolCallProposal) -> tuple[SemanticToolCallProposal, object]:
+    # Canonicalize envelope variations before strict Pydantic validation
+    try:
+        canonical_args = canonicalize_tool_arguments(
+            tool_name=proposal.tool_name or "",
+            raw_arguments=proposal.arguments,
+        )
+    except SemanticInterpreterInvalidResponseError as exc:
+        logger.warning(
+            "canonicalize_tool_arguments_failed tool=%s reason=%s",
+            proposal.tool_name,
+            exc,
+        )
+        return proposal, None
+    if canonical_args is not proposal.arguments:
+        proposal = SemanticToolCallProposal(tool_name=proposal.tool_name, arguments=canonical_args)
     normalized_proposal = normalize_patch_active_draft_argument_shape(proposal)
     if normalized_proposal.tool_name == "patch_active_draft":
         return normalized_proposal, PatchActiveDraftArguments.model_validate(normalized_proposal.arguments)
@@ -1677,6 +1923,195 @@ def _fast_path_proposal() -> SemanticToolCallProposal:
     return SemanticToolCallProposal()
 
 
+def resolve_no_tool_call_fallback(
+    db: "Session",
+    payload: "TranscriptParseRequest",
+    extracted_fields: "SemanticFieldPatch",
+    metrics,
+) -> "SemanticTranscriptResponse | None":
+    """Deterministic routing when the LLM returned no tool call or invalid tool arguments.
+
+    Delegates to resolve_semantic_fallback with failure_kind="no_tool_call".
+    """
+    return resolve_semantic_fallback(
+        db=db,
+        payload=payload,
+        extracted_fields=extracted_fields,
+        metrics=metrics,
+        failure_kind="no_tool_call",
+    )
+
+
+def resolve_semantic_fallback(
+    *,
+    db: "Session",
+    payload: "TranscriptParseRequest",
+    extracted_fields: "SemanticFieldPatch",
+    metrics,
+    failure_kind: Literal["no_tool_call", "invalid_tool_arguments", "unsupported_tool"] = "no_tool_call",
+) -> SemanticTranscriptResponse | None:
+    """Unified deterministic routing for all LLM failure modes.
+
+    Routing precedence (applied consistently regardless of failure_kind):
+    1. Lifecycle intent → None (caller must not absorb lifecycle commands).
+    2. Explicit create intent + company + role → synthesise patch_active_draft.
+    3. Explicit saved-row update intent → attempt preview_existing_application_update.
+    4. Company + role present (no active draft) → synthesise patch_active_draft → create draft.
+    5. Active draft exists + actionable non-company patch fields → patch active draft.
+    6. Active draft exists + company or role → patch active draft (identity update).
+    7. Company only, no active draft, no role → clarification: Which role?
+    8. Role only, no company, no active draft → clarification: Which company?
+    9. No actionable fields → None (caller emits no_change).
+    """
+    transcript = payload.transcript
+
+    # Rule 1 — lifecycle commands must never be absorbed
+    if _has_lifecycle_intent(transcript):
+        return None
+
+    has_company = bool(extracted_fields.company)
+    has_role = bool(extracted_fields.role)
+
+    # Rule 2 — explicit create intent: route straight to draft create/patch
+    if _has_explicit_create_intent(transcript):
+        if has_company and has_role:
+            return _synthesise_patch_active_draft(db, payload, extracted_fields, metrics)
+        if has_company and not has_role:
+            question = f"Which role should I add for {extracted_fields.company}?"
+            return SemanticTranscriptResponse(
+                status="clarification_required",
+                operation="none",
+                raw_transcript=transcript,
+                proposal=_proposal_with_clarification(question),
+                warnings=[],
+                clarification_question=question,
+                interpreter_metrics=metrics,
+            )
+        if has_role and not has_company:
+            return SemanticTranscriptResponse(
+                status="clarification_required",
+                operation="none",
+                raw_transcript=transcript,
+                proposal=_proposal_with_clarification(CLARIFICATION_MISSING_COMPANY),
+                warnings=[],
+                clarification_question=CLARIFICATION_MISSING_COMPANY,
+                interpreter_metrics=metrics,
+            )
+        # Create intent but neither company nor role extracted
+        return SemanticTranscriptResponse(
+            status="clarification_required",
+            operation="none",
+            raw_transcript=transcript,
+            proposal=_proposal_with_clarification(CLARIFICATION_MISSING_COMPANY),
+            warnings=[],
+            clarification_question=CLARIFICATION_MISSING_COMPANY,
+            interpreter_metrics=metrics,
+        )
+
+    # Rule 3 — explicit saved-row update intent
+    if _has_explicit_saved_update_intent(transcript):
+        if has_company:
+            target = PreviewExistingApplicationTarget(
+                company=extracted_fields.company,
+                role=extracted_fields.role,
+            )
+            update_fields = extracted_fields.model_copy(update={"company": None})
+            proposal = SemanticToolCallProposal(
+                tool_name="preview_existing_application_update",
+                arguments={
+                    "target": target.model_dump(exclude_none=True),
+                    "fields": update_fields.model_dump(exclude_none=True),
+                    "replace_explicit_fields": True,
+                },
+            )
+            try:
+                proposal, validated_args = validate_tool_arguments_with_safe_normalization(proposal)
+            except Exception:
+                validated_args = None
+            if validated_args is not None:
+                return handle_preview_existing_application_update(db, payload, proposal, validated_args, metrics)
+        return None
+
+    context = build_context_payload(payload)
+    active_draft = build_context_draft(context)
+    has_active_draft = active_draft is not None
+    has_non_identity_fields = fields_have_values(
+        extracted_fields.model_copy(update={"company": None, "role": None}),
+        allow_company=False,
+    )
+
+    # Rule 4 — company + role present, no active draft → create draft
+    if has_company and has_role and not has_active_draft:
+        return _synthesise_patch_active_draft(db, payload, extracted_fields, metrics)
+
+    # Rule 5 — active draft exists + non-identity actionable fields → patch draft
+    if has_active_draft and has_non_identity_fields:
+        return _synthesise_patch_active_draft(db, payload, extracted_fields, metrics)
+
+    # Rule 6 — active draft exists + company or role → patch draft (identity update)
+    if has_active_draft and (has_company or has_role):
+        return _synthesise_patch_active_draft(db, payload, extracted_fields, metrics)
+
+    # Rule 7 — company only, no active draft, no role → ask for role
+    if has_company and not has_role and not has_active_draft:
+        question = f"Which role should I add for {extracted_fields.company}?"
+        return SemanticTranscriptResponse(
+            status="clarification_required",
+            operation="none",
+            raw_transcript=transcript,
+            proposal=_proposal_with_clarification(question),
+            warnings=[],
+            clarification_question=question,
+            interpreter_metrics=metrics,
+        )
+
+    # Rule 8 — role only, no company, no active draft → ask for company
+    if has_role and not has_company and not has_active_draft:
+        return SemanticTranscriptResponse(
+            status="clarification_required",
+            operation="none",
+            raw_transcript=transcript,
+            proposal=_proposal_with_clarification(CLARIFICATION_MISSING_COMPANY),
+            warnings=[],
+            clarification_question=CLARIFICATION_MISSING_COMPANY,
+            interpreter_metrics=metrics,
+        )
+
+    # Rule 9 — nothing actionable
+    return None
+
+
+def _synthesise_patch_active_draft(
+    db: "Session",
+    payload: "TranscriptParseRequest",
+    extracted_fields: "SemanticFieldPatch",
+    metrics,
+) -> "SemanticTranscriptResponse":
+    """Build and execute a synthetic patch_active_draft call from validated extracted fields."""
+    fallback_proposal = SemanticToolCallProposal(
+        tool_name="patch_active_draft",
+        arguments={
+            "fields": extracted_fields.model_dump(exclude_none=True),
+            "replace_explicit_fields": True,
+            "context_notes": [],  # no internal diagnostics in public output
+        },
+    )
+    try:
+        fallback_proposal, fallback_args = validate_tool_arguments_with_safe_normalization(fallback_proposal)
+    except Exception:
+        fallback_args = None
+    if fallback_args is None:
+        return SemanticTranscriptResponse(
+            status="unsupported",
+            operation="none",
+            raw_transcript=payload.transcript,
+            proposal=fallback_proposal,
+            warnings=["No recognized tracker changes were found."],
+            interpreter_metrics=metrics,
+        )
+    return handle_patch_active_draft(db, payload, fallback_proposal, fallback_args, metrics)
+
+
 def interpret_transcript_command(
     db: Session,
     payload: TranscriptParseRequest,
@@ -1702,7 +2137,25 @@ def interpret_transcript_command(
     except SemanticInterpreterUnavailableError as exc:
         return SemanticTranscriptResponse(status="unavailable", operation="none", raw_transcript=payload.transcript, proposal=empty_proposal(), warnings=[str(exc)])
     except SemanticInterpreterInvalidResponseError as exc:
-        return unsupported_response(payload, [str(exc)])
+        # No tool call returned — attempt field-extraction-based fallback before giving up.
+        # Try to extract fields independently; if that also fails, surface the original error.
+        try:
+            fallback_extracted, fallback_metrics = interpreter.extract_fields(payload.transcript, context)
+        except (SemanticInterpreterUnavailableError, SemanticInterpreterInvalidResponseError):
+            fallback_extracted = None
+            fallback_metrics = None
+        if fallback_extracted is not None:
+            fallback_fields, _fw = normalize_extracted_fields(fallback_extracted, transcript=payload.transcript)
+            if fallback_fields is not None and _fields_can_create_or_patch_draft(fallback_fields):
+                logger.info(
+                    "semantic_no_tool_call_fallback_attempt transcript=%r extracted=%r",
+                    payload.transcript,
+                    _safe_extracted_field_log(fallback_fields.model_dump(exclude_none=True)),
+                )
+                fallback_response = resolve_no_tool_call_fallback(db, payload, fallback_fields, fallback_metrics)
+                if fallback_response is not None:
+                    return fallback_response
+        return unsupported_response(payload, ["No recognized tracker changes were found."])
 
     extracted_fields, extraction_warnings = normalize_extracted_fields(
         interpretation.extracted_fields, transcript=payload.transcript
@@ -1720,7 +2173,11 @@ def interpret_transcript_command(
         interpretation.proposal.tool_name,
         interpretation.proposal.arguments,
     )
-    merged_proposal = merge_extracted_fields_into_proposal(db, interpretation.proposal, extracted_fields)
+    try:
+        merged_proposal = merge_extracted_fields_into_proposal(db, interpretation.proposal, extracted_fields)
+    except SemanticInterpreterInvalidResponseError as exc:
+        logger.warning("merge_extracted_fields_invalid_shape tool=%s reason=%s", interpretation.proposal.tool_name, exc)
+        merged_proposal = None
     if merged_proposal is None:
         return unsupported_response(
             payload,
@@ -1754,7 +2211,11 @@ def interpret_transcript_command(
             )
             if retry_extracted_fields is None:
                 return unsupported_response(payload, retry_extraction_warnings, metrics=retry_interpretation.metrics)
-            merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
+            try:
+                merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
+            except SemanticInterpreterInvalidResponseError as exc:
+                logger.warning("merge_extracted_fields_invalid_shape tool=%s reason=%s", retry_interpretation.proposal.tool_name, exc)
+                merged_retry_proposal = None
             if merged_retry_proposal is None:
                 return unsupported_response(
                     payload,
@@ -1766,11 +2227,12 @@ def interpret_transcript_command(
 
     try:
         proposal, validated_arguments = validate_tool_arguments_with_safe_normalization(proposal)
-        logger.info(
-            "semantic_post_schema_repair_arguments tool=%s arguments=%r",
-            proposal.tool_name,
-            proposal.arguments,
-        )
+        if validated_arguments is not None:
+            logger.info(
+                "semantic_post_schema_repair_arguments tool=%s arguments=%r",
+                proposal.tool_name,
+                proposal.arguments,
+            )
     except ValidationError as exc:
         logger.warning(
             "semantic_tool_argument_validation_failed tool=%s arguments=%r reason=%r",
@@ -1804,7 +2266,11 @@ def interpret_transcript_command(
                 )
                 if retry_extracted_fields is None:
                     return unsupported_response(payload, retry_extraction_warnings, metrics=retry_interpretation.metrics)
-                merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
+                try:
+                    merged_retry_proposal = merge_extracted_fields_into_proposal(db, retry_interpretation.proposal, retry_extracted_fields)
+                except SemanticInterpreterInvalidResponseError as exc:
+                    logger.warning("merge_extracted_fields_invalid_shape tool=%s reason=%s", retry_interpretation.proposal.tool_name, exc)
+                    merged_retry_proposal = None
                 if merged_retry_proposal is None:
                     return unsupported_response(
                         payload,
@@ -1823,6 +2289,25 @@ def interpret_transcript_command(
                 except ValidationError:
                     return unsupported_response(payload, ["Local language interpreter returned invalid tool arguments. No tracker changes were saved."])
         if validated_arguments is None:
+            # Before giving up: try deterministic routing using extracted fields.
+            # This recovers the case where explicit create intent was present but
+            # the LLM emitted invalid tool arguments (e.g. malformed patch_active_draft).
+            if extracted_fields is not None and _fields_can_create_or_patch_draft(extracted_fields):
+                logger.info(
+                    "semantic_invalid_tool_args_fallback_attempt tool=%s transcript=%r extracted=%r",
+                    proposal.tool_name,
+                    payload.transcript,
+                    _safe_extracted_field_log(extracted_fields.model_dump(exclude_none=True)),
+                )
+                fallback_response = resolve_semantic_fallback(
+                    db=db,
+                    payload=payload,
+                    extracted_fields=extracted_fields,
+                    metrics=metrics,
+                    failure_kind="invalid_tool_arguments",
+                )
+                if fallback_response is not None:
+                    return fallback_response
             if interpret_calls >= max_tool_turns:
                 # Retry budget exhausted: ask the user to rephrase instead of looping further.
                 return SemanticTranscriptResponse(
@@ -1835,6 +2320,102 @@ def interpret_transcript_command(
                     interpreter_metrics=metrics,
                 )
             return unsupported_response(payload, ["Local language interpreter returned invalid tool arguments. No tracker changes were saved."])
+
+    # Canonicalization may return (proposal, None) without raising ValidationError
+    # (e.g. conflicting envelope values). Only treat as invalid args for schema-validated
+    # tools — unknown/passthrough tools (attach_latest_browser_context) return None
+    # intentionally and must fall through to the contextual patch fallback below.
+    _SCHEMA_VALIDATED_TOOLS = {
+        "patch_active_draft",
+        "preview_existing_application_update",
+        "request_draft_save",
+        "ask_clarification",
+        "archive_application",
+        "explain_delete_policy",
+        "discard_draft",
+    }
+    if validated_arguments is None and proposal.tool_name in _SCHEMA_VALIDATED_TOOLS:
+        if extracted_fields is not None and _fields_can_create_or_patch_draft(extracted_fields):
+            fallback_response = resolve_semantic_fallback(
+                db=db,
+                payload=payload,
+                extracted_fields=extracted_fields,
+                metrics=metrics,
+                failure_kind="invalid_tool_arguments",
+            )
+            if fallback_response is not None:
+                return fallback_response
+        return unsupported_response(payload, ["Local language interpreter returned invalid tool arguments. No tracker changes were saved."])
+
+    # -----------------------------------------------------------------------
+    # Active-draft contextual patch fallback
+    # -----------------------------------------------------------------------
+    # Intercept non-mutation tool outcomes (ask_clarification, or tools that
+    # don't produce a draft/application mutation) when:
+    #   1. An active new-application draft exists in context
+    #   2. Validated extracted fields contain one or more actionable patch fields
+    #   3. The transcript does not express a lifecycle intent (save/discard/archive…)
+    #   4. The transcript does not explicitly target a known saved application
+    # → synthesise a patch_active_draft call against the active draft instead.
+    # This handles short follow-up commands like "change status to in-touch" or
+    # "role is AI Engineer, change employment type to fulltime" after a draft exists.
+    _FALLBACK_ELIGIBLE_TOOLS = {"ask_clarification", "attach_latest_browser_context"}
+    if (
+        proposal.tool_name in _FALLBACK_ELIGIBLE_TOOLS
+        and not _has_lifecycle_intent(payload.transcript)
+        and not explicit_known_companies  # saved-target exclusion
+        and fields_have_values(extracted_fields, allow_company=False)
+    ):
+        context_for_fallback = build_context_payload(payload)
+        fallback_draft = build_context_draft(context_for_fallback)
+        if fallback_draft is not None:
+            logger.info(
+                "semantic_active_draft_contextual_patch_fallback transcript=%r extracted=%r",
+                payload.transcript,
+                extracted_fields.model_dump(exclude_none=True),
+            )
+            fallback_fields = dict(extracted_fields.model_dump(exclude_none=True))
+            fallback_proposal = SemanticToolCallProposal(
+                tool_name="patch_active_draft",
+                arguments={
+                    "fields": fallback_fields,
+                    "replace_explicit_fields": True,
+                    "context_notes": [],
+                },
+            )
+            try:
+                fallback_proposal, fallback_args = validate_tool_arguments_with_safe_normalization(fallback_proposal)
+            except Exception:
+                fallback_args = None
+            if fallback_args is not None:
+                return handle_patch_active_draft(db, payload, fallback_proposal, fallback_args, metrics)
+
+    # -----------------------------------------------------------------------
+    # Explicit create-intent precedence override
+    # -----------------------------------------------------------------------
+    # When the transcript has explicit create intent (e.g. "add application for AI Engineer
+    # at Neilsoft") but the LLM selected preview_existing_application_update, override the
+    # tool selection and route to draft create/patch instead.
+    if (
+        proposal.tool_name == "preview_existing_application_update"
+        and not _has_lifecycle_intent(payload.transcript)
+        and _has_explicit_create_intent(payload.transcript)
+        and extracted_fields is not None
+    ):
+        logger.info(
+            "semantic_explicit_create_intent_override tool=%s transcript=%r",
+            proposal.tool_name,
+            payload.transcript,
+        )
+        override_response = resolve_semantic_fallback(
+            db=db,
+            payload=payload,
+            extracted_fields=extracted_fields,
+            metrics=metrics,
+            failure_kind="unsupported_tool",
+        )
+        if override_response is not None:
+            return override_response
 
     if proposal.tool_name == "patch_active_draft":
         arguments = validated_arguments

@@ -269,6 +269,34 @@ def _handle_reapply(existing: JobApplication, requested_status: str, operation: 
     )
 
 
+def _compute_effective_draft_changes(app: JobApplication, changes: ApplicationChanges) -> dict:
+    """Return only the changes whose proposed value differs from the current draft value."""
+    effective: dict = {}
+    if changes.company is not None and changes.company != app.company:
+        effective["company"] = changes.company
+    if changes.role is not None and changes.role != app.role:
+        effective["role"] = changes.role
+    if changes.status is not None and changes.status != app.status:
+        effective["status"] = changes.status
+    if changes.priority is not None and changes.priority != app.priority:
+        effective["priority"] = changes.priority
+    if changes.location_mode is not None and changes.location_mode != app.location:
+        effective["location_mode"] = changes.location_mode
+    if changes.job_link is not None and changes.job_link != app.job_link:
+        effective["job_link"] = changes.job_link
+    if changes.employment_types is not None and list(changes.employment_types) != list(app.employment_types_json):
+        effective["employment_types"] = changes.employment_types
+    if changes.current_stages is not None and list(changes.current_stages) != list(app.current_stages_json):
+        effective["current_stages"] = changes.current_stages
+    if changes.next_action is not None and changes.next_action != app.next_action:
+        effective["next_action"] = changes.next_action
+    if changes.comments is not None and changes.comments != app.comments:
+        effective["comments"] = changes.comments
+    if changes.engaged_days is not None and changes.engaged_days != app.engaged_days:
+        effective["engaged_days"] = changes.engaged_days
+    return effective
+
+
 def handle_patch_draft(payload: MutationPayload, db: Session) -> MutationResult:
     enum_error = _validate_enum_fields(payload.changes, "patch_draft")
     if enum_error:
@@ -317,6 +345,16 @@ def handle_patch_draft(payload: MutationPayload, db: Session) -> MutationResult:
                     operation="patch_draft",
                     message=f"An application for {new_company_name} — {new_role_display} already exists.",
                 )
+
+        # No-op detection: skip commit when no field actually changes.
+        effective_changes = _compute_effective_draft_changes(app, payload.changes)
+        if not effective_changes:
+            return MutationResult(
+                success=True,
+                operation="no_change",
+                message="Draft already has those values.",
+                draft=_application_to_dict(app),
+            )
 
         _apply_changes_to_application(app, payload.changes, db)
         db.commit()

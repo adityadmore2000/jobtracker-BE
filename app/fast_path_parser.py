@@ -1,15 +1,40 @@
 import re
 from typing import TYPE_CHECKING
 
-from .constants import ALLOWED_PRIORITIES, ALLOWED_LOCATIONS
+from .constants import (
+    STATUS_ALIASES,
+    STATUS_OPTIONS,
+    EMPLOYMENT_TYPE_ALIASES,
+    LOCATION_ALIASES,
+    PRIORITY_ALIASES,
+)
 from .mutation_schemas import ApplicationChanges, MutationPayload, MutationTarget
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
+# Matches the command span starting at any recognized explicit anchor.
+# Leading conversational prefixes ("please", "do me a favor,", etc.) are
+# ignored by searching for the anchor rather than anchoring at ^.
+_CREATE_DRAFT_PATTERN = re.compile(
+    r"(?:add|create|track)\s+application\s+for\s+(.+?)\s+at\s+(.+)$",
+    re.IGNORECASE,
+)
+
+# Compiled patterns for explicit single-field update templates.
+_FIELD_UPDATE_PATTERN = re.compile(
+    r"^(?:set|change)\s+(status|priority|location|employment\s+type)\s+to\s+(.+)$",
+    re.IGNORECASE,
+)
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _normalize_lookup(value: str) -> str:
+    """Collapse whitespace, lowercase, replace separators with spaces for alias lookup."""
+    return " ".join(value.strip().replace("-", " ").replace("_", " ").casefold().split())
 
 
 def _resolve_patch_target(context: dict) -> tuple[str | None, MutationTarget | None]:
@@ -18,7 +43,7 @@ def _resolve_patch_target(context: dict) -> tuple[str | None, MutationTarget | N
         return "patch_draft", MutationTarget(draft_id=str(draft_id))
     app_id = context.get("active_application_id")
     if app_id is not None:
-        return "patch_application", MutationTarget(application_id=int(app_id))
+        return "create_application_update_draft", MutationTarget(application_id=int(app_id))
     return None, None
 
 
@@ -210,4 +235,77 @@ def try_parse(transcript: str, context: dict) -> MutationPayload | None:
                     changes=ApplicationChanges(),
                 )
 
+    # Explicit create-draft: "add/create/track application for {role} at {company}"
+    # .search() finds the anchor anywhere in the string, allowing harmless
+    # conversational prefixes like "please" or "do me a favor," before it.
+    m = _CREATE_DRAFT_PATTERN.search(transcript.strip())
+    if m:
+        raw_role = re.sub(r"\s+", " ", m.group(1).strip())
+        raw_company = re.sub(r"\s+", " ", m.group(2).strip())
+        if raw_role and raw_company:
+            return MutationPayload(
+                operation="create_draft",
+                target=MutationTarget(),
+                changes=ApplicationChanges(company=raw_company, role=raw_role),
+            )
+        return None
+
+    # Explicit single-field update: "set/change {field} to {value}"
+    m = _FIELD_UPDATE_PATTERN.match(transcript.strip())
+    if m:
+        field_key = re.sub(r"\s+", " ", m.group(1).strip().lower())
+        raw_value = re.sub(r"\s+", " ", m.group(2).strip())
+        operation, target = _resolve_patch_target(context)
+        if operation is None or target is None:
+            return None
+
+        if field_key == "status":
+            canonical = _normalize_status(raw_value)
+            if canonical is None:
+                return None
+            return MutationPayload(
+                operation=operation,
+                target=target,
+                changes=ApplicationChanges(status=canonical),
+            )
+
+        if field_key == "priority":
+            canonical = PRIORITY_ALIASES.get(_normalize_lookup(raw_value))
+            if canonical is None:
+                return None
+            return MutationPayload(
+                operation=operation,
+                target=target,
+                changes=ApplicationChanges(priority=canonical),
+            )
+
+        if field_key == "location":
+            canonical = LOCATION_ALIASES.get(_normalize_lookup(raw_value))
+            if canonical is None:
+                return None
+            return MutationPayload(
+                operation=operation,
+                target=target,
+                changes=ApplicationChanges(location_mode=canonical),
+            )
+
+        if field_key == "employment type":
+            canonical = EMPLOYMENT_TYPE_ALIASES.get(_normalize_lookup(raw_value))
+            if canonical is None:
+                return None
+            return MutationPayload(
+                operation=operation,
+                target=target,
+                changes=ApplicationChanges(employment_types=[canonical]),
+            )
+
+    return None
+
+
+def _normalize_status(value: str) -> str | None:
+    key = _normalize_lookup(value)
+    if key in STATUS_ALIASES:
+        return STATUS_ALIASES[key]
+    if value.strip() in STATUS_OPTIONS:
+        return value.strip()
     return None

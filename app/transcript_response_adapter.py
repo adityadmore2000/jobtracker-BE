@@ -234,7 +234,10 @@ def to_public_transcript_response(internal: SemanticTranscriptResponse) -> Publi
         message = _DEFAULT_MESSAGES.get(public_status, "Done.")
 
     public_draft: PublicApplicationDTO | None = None
-    if internal.draft is not None:
+    if internal.draft_dict is not None:
+        # Prefer the persisted row dict — has the real id, created_at, updated_at.
+        public_draft = to_public_application(internal.draft_dict)
+    elif internal.draft is not None:
         public_draft = PublicApplicationDTO(
             id=0,
             company=internal.draft.company,
