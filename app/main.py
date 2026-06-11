@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -9,39 +10,8 @@ from livekit.api import AccessToken, VideoGrants
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .company_matching import has_meaningful_company_difference, normalize_company_name
-from .company_resolution import (
-    ensure_canonical_company,
-    get_application_matches_for_company,
-    get_canonical_company_by_normalized_name,
-    get_company_alias_by_normalized_name,
-    get_or_create_company,
-    resolve_company_name,
-)
-from .constants import (
-    ALLOWED_CURRENT_STAGES,
-    ALLOWED_EMPLOYMENT_TYPES,
-    ALLOWED_LOCATIONS,
-    ALLOWED_PRIORITIES,
-    ALLOWED_ROLES,
-    STATUS_OPTIONS,
-)
-from .database import get_db
-from .livekit_config import LiveKitConfigurationError, get_livekit_settings
-from .migrations import run_startup_migrations_if_enabled
-from .models import ApplicationChangeDraft, ApplicationEvent, ApplicationNote, AsrCompanyCorrectionEvent, BrowserContext, CanonicalCompany, Company, CompanyAlias, JobApplication
-from .mutation_dispatcher import dispatch
-from .mutation_schemas import MutationPayload, MutationTarget, ApplicationChanges
-from .public_schemas import PublicApplicationChangeDraftDTO, PublicApplicationDTO, PublicTranscriptResponse
-from .role_resolution import find_application_by_company_role, normalize_role_name
-from .transcript_response_adapter import (
-    clarification_needed_response,
-    mutation_result_to_public_response,
-    to_public_application,
-    to_public_change_draft,
-    to_public_transcript_response,
-    unsupported_command_response,
-)
+from .database import Base, engine, get_db
+from .models import BrowserContext, JobApplication
 from .schemas import (
     ApplicationCompanyConfirmationRequest,
     ApplicationCreateCandidateRequest,
@@ -58,16 +28,9 @@ from .schemas import (
     SemanticTranscriptResponse,
     TranscriptParseRequest,
 )
-from .fast_path_parser import ClarificationNeeded, ParseMiss, try_parse_v2
-from .semantic_interpreter import OllamaSemanticInterpreter, get_semantic_interpreter
-from .semantic_validation import interpret_transcript_command
+from .transcript_parser import parse_transcript
 
-
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    run_startup_migrations_if_enabled()
-    yield
-
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Job Tracker API", lifespan=lifespan)
 HOTWORD_LIMIT = 100
@@ -218,187 +181,9 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/semantic-interpreter/health")
-async def semantic_interpreter_health(interpreter: OllamaSemanticInterpreter = Depends(get_semantic_interpreter)) -> dict[str, str]:
-    return interpreter.health_check()
-
-
-@app.patch("/drafts/{draft_id}", response_model=PublicApplicationDTO)
-async def patch_draft(
-    draft_id: int,
-    payload: DraftPatchRequest,
-    db: Session = Depends(get_db),
-) -> PublicApplicationDTO:
-    app_row = db.get(JobApplication, draft_id)
-    if app_row is None or not app_row.is_draft:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
-
-    changes = ApplicationChanges(
-        company=payload.company,
-        role=payload.role,
-        status=payload.status,
-        priority=payload.priority,
-        location_mode=payload.location,
-        job_link=payload.job_link,
-        employment_types=payload.employment_types,
-        current_stages=payload.current_stages,
-    )
-    mutation = MutationPayload(
-        operation="patch_draft",
-        target=MutationTarget(draft_id=str(draft_id)),
-        changes=changes,
-    )
-    result = dispatch(mutation, db)
-    if not result.success:
-        http_status = status.HTTP_409_CONFLICT if result.conflict else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(status_code=http_status, detail=result.message)
-
-    if payload.engaged_days is not None:
-        app_row.engaged_days = payload.engaged_days
-    if payload.next_action is not None:
-        app_row.next_action = payload.next_action
-    if payload.comments is not None:
-        app_row.comments = payload.comments
-    db.commit()
-    db.refresh(app_row)
-
-    return to_public_application(app_row)
-
-
-@app.post("/drafts/{draft_id}/save", response_model=PublicApplicationDTO)
-async def save_draft(draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationDTO:
-    app_row = db.get(JobApplication, draft_id)
-    if app_row is None or not app_row.is_draft:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
-
-    mutation = MutationPayload(
-        operation="save_draft",
-        target=MutationTarget(draft_id=str(draft_id)),
-        changes=ApplicationChanges(),
-    )
-    result = dispatch(mutation, db)
-    if not result.success:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
-
-    db.refresh(app_row)
-    return to_public_application(app_row)
-
-
-@app.post("/drafts/{draft_id}/discard", status_code=status.HTTP_204_NO_CONTENT)
-async def discard_draft(draft_id: int, db: Session = Depends(get_db)) -> Response:
-    app_row = db.get(JobApplication, draft_id)
-    if app_row is None or not app_row.is_draft:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
-
-    mutation = MutationPayload(
-        operation="discard_draft",
-        target=MutationTarget(draft_id=str(draft_id)),
-        changes=ApplicationChanges(),
-    )
-    result = dispatch(mutation, db)
-    if not result.success:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
-
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@app.get("/application-change-drafts/{change_draft_id}", response_model=PublicApplicationChangeDraftDTO)
-async def get_application_change_draft(change_draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationChangeDraftDTO:
-    cd = db.get(ApplicationChangeDraft, change_draft_id)
-    if cd is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Change draft {change_draft_id} not found")
-    app_row = db.get(JobApplication, cd.target_application_id)
-    if app_row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target application not found")
-    from .mutation_dispatcher import _change_draft_to_dict
-    cd_dict = _change_draft_to_dict(cd, app_row)
-    dto = to_public_change_draft(cd_dict)
-    if dto is None:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to build change draft DTO")
-    return dto
-
-
-@app.post("/application-change-drafts/{change_draft_id}/apply", response_model=PublicApplicationDTO)
-async def apply_application_change_draft(change_draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationDTO:
-    cd = db.get(ApplicationChangeDraft, change_draft_id)
-    if cd is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Change draft {change_draft_id} not found")
-
-    mutation = MutationPayload(
-        operation="apply_application_update_draft",
-        target=MutationTarget(change_draft_id=change_draft_id),
-        changes=ApplicationChanges(),
-    )
-    result = dispatch(mutation, db)
-    if not result.success:
-        http_status = status.HTTP_409_CONFLICT if result.conflict else status.HTTP_400_BAD_REQUEST
-        raise HTTPException(status_code=http_status, detail=result.message)
-
-    return to_public_application(result.application)
-
-
-@app.post("/application-change-drafts/{change_draft_id}/discard", status_code=status.HTTP_200_OK)
-async def discard_application_change_draft(change_draft_id: int, db: Session = Depends(get_db)) -> dict:
-    cd = db.get(ApplicationChangeDraft, change_draft_id)
-    if cd is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Change draft {change_draft_id} not found")
-
-    mutation = MutationPayload(
-        operation="discard_application_update_draft",
-        target=MutationTarget(change_draft_id=change_draft_id),
-        changes=ApplicationChanges(),
-    )
-    result = dispatch(mutation, db)
-    if not result.success:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
-
-    return {"message": result.message}
-
-
-@app.get("/applications/archived", response_model=list[PublicApplicationDTO])
-async def list_archived_applications(db: Session = Depends(get_db)) -> list[PublicApplicationDTO]:
-    rows = (
-        db.query(JobApplication)
-        .filter(JobApplication.is_draft == False)  # noqa: E712
-        .filter(JobApplication.archived_at != None)  # noqa: E711
-        .order_by(JobApplication.archived_at.desc())
-        .all()
-    )
-    return [to_public_application(row) for row in rows]
-
-
-@app.get("/applications", response_model=list[PublicApplicationDTO])
-async def list_applications(db: Session = Depends(get_db)) -> list[PublicApplicationDTO]:
-    rows = (
-        db.query(JobApplication)
-        .filter(JobApplication.is_draft == False)  # noqa: E712
-        .filter(JobApplication.archived_at == None)  # noqa: E711
-        .order_by(JobApplication.updated_at.desc())
-        .all()
-    )
-    return [to_public_application(row) for row in rows]
-
-
-@app.get("/asr/hotwords", response_model=AsrHotwordsResponse)
-async def get_asr_hotwords(db: Session = Depends(get_db)) -> AsrHotwordsResponse:
-    return AsrHotwordsResponse(hotwords=build_hotword_list(db), limit=HOTWORD_LIMIT)
-
-
-@app.post("/livekit/token", response_model=LiveKitTokenResponse)
-async def create_livekit_token(payload: LiveKitTokenRequest) -> LiveKitTokenResponse:
-    participant_identity = f"browser-{uuid4()}"
-    try:
-        access_token, expires_at, url = create_livekit_browser_token(payload.room_name, participant_identity)
-    except LiveKitConfigurationError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-
-    return LiveKitTokenResponse(
-        url=url,
-        room_name=payload.room_name,
-        participant_identity=participant_identity,
-        access_token=access_token,
-        expires_at=expires_at,
-    )
+@app.get("/applications", response_model=list[JobApplicationRead])
+async def list_applications(db: Session = Depends(get_db)) -> list[JobApplication]:
+    return db.query(JobApplication).order_by(JobApplication.updated_at.desc()).all()
 
 
 @app.post("/browser-context", response_model=BrowserContextResponse, status_code=status.HTTP_201_CREATED)
@@ -416,56 +201,14 @@ async def get_latest_browser_context(db: Session = Depends(get_db)) -> dict[str,
     return {"context": context}
 
 
-def _build_applications_list(db: Session) -> list[dict]:
-    """Return active + archived applications as plain dicts for parser context."""
-    apps = (
-        db.query(JobApplication)
-        .filter(JobApplication.is_draft == False)  # noqa: E712
-        .all()
-    )
-    result = []
-    for a in apps:
-        result.append({
-            "id": a.id,
-            "company": a.company,
-            "role": a.role or "",
-            "archived_at": a.archived_at.isoformat() if a.archived_at else None,
-        })
-    return result
+@app.post("/transcript/parse", response_model=ParsedTranscriptCommand)
+async def parse_transcript_command(payload: TranscriptParseRequest) -> ParsedTranscriptCommand:
+    return parse_transcript(payload.transcript)
 
 
-@app.post("/transcript/parse", response_model=PublicTranscriptResponse)
-async def parse_transcript_command(
-    payload: TranscriptParseRequest,
-    db: Session = Depends(get_db),
-    interpreter: OllamaSemanticInterpreter = Depends(get_semantic_interpreter),
-) -> PublicTranscriptResponse:
-    # Build parser context, injecting the applications list for company resolution.
-    raw_context = payload.context or {}
-    applications_list = _build_applications_list(db)
-    parser_context = dict(raw_context)
-    parser_context["applications"] = applications_list
-
-    # Controlled parser: try_parse_v2 must run first.
-    # It returns MutationPayload (dispatch), ClarificationNeeded (surface question),
-    # or ParseMiss (no supported anchor — block mutation LLM path).
-    controlled_result = try_parse_v2(payload.transcript, parser_context)
-
-    if isinstance(controlled_result, MutationPayload):
-        mutation_result = dispatch(controlled_result, db)
-        return mutation_result_to_public_response(mutation_result)
-
-    if isinstance(controlled_result, ClarificationNeeded):
-        return clarification_needed_response(
-            controlled_result.question,
-            controlled_result.pending_command or None,
-        )
-
-    # ParseMiss: no supported command anchor found.
-    # The legacy LLM pipeline is intentionally NOT called for mutations.
-    # USE_LEGACY_SEMANTIC_MUTATIONS=0 (default disabled).
-    assert isinstance(controlled_result, ParseMiss)
-    return unsupported_command_response()
+@app.post("/transcript/parse-correction", response_model=ParsedTranscriptCommand)
+async def parse_transcript_correction(payload: TranscriptParseRequest) -> ParsedTranscriptCommand:
+    return parse_transcript(payload.transcript, correction=True)
 
 
 @app.post("/applications", response_model=JobApplicationRead, status_code=status.HTTP_201_CREATED)
@@ -539,12 +282,17 @@ async def confirm_company_and_create_application(
     return application
 
 
-@app.get("/applications/{application_id}", response_model=JobApplicationRead)
-async def get_application(application_id: int, db: Session = Depends(get_db)) -> JobApplication:
+@app.get("/applications/{application_id}", response_model=PublicApplicationDTO)
+async def get_application(application_id: int, db: Session = Depends(get_db)) -> PublicApplicationDTO:
+    """Fetch a single application (saved or archived) for direct URL addressing.
+
+    Returns the scalar public DTO so it matches the GET /applications list shape
+    and the frontend Application type used by the route-addressable detail view.
+    """
     application = db.get(JobApplication, application_id)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
-    return application
+    return to_public_application(application)
 
 
 @app.patch("/applications/{application_id}", response_model=JobApplicationRead)

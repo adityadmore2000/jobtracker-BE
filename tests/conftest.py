@@ -69,6 +69,19 @@ def reset_database_state():
     truncate_all_tables()
 
 
+@pytest.fixture(autouse=True)
+def disable_single_extractor_by_default(monkeypatch):
+    """Tests must never hit a live Ollama.
+
+    The single-call semantic extractor defaults ON in production
+    (USE_SINGLE_SEMANTIC_EXTRACTOR=1). For deterministic tests we default it OFF
+    so a ParseMiss yields the safe ``unsupported`` response. Tests that exercise
+    the extractor explicitly re-enable it and stub ``extract_semantic_command_once``.
+    """
+    monkeypatch.setenv("USE_SINGLE_SEMANTIC_EXTRACTOR", "0")
+    yield
+
+
 @pytest.fixture
 def db_session():
     with SessionLocal() as session:

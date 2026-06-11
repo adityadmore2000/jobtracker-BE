@@ -342,10 +342,13 @@ _DISCARD_TRIGGERS = {"discard it", "discard", "discard this", "discard draft", "
 _APPLY_CHANGES_TRIGGERS = {"apply changes"}
 _DISCARD_CHANGES_TRIGGERS = {"discard changes"}
 
-# Legacy field-update patterns kept for backward-compat
-# "set priority to X", "set location to X", "set employment type to X"
+# Legacy field-update patterns kept for backward-compat, extended with the
+# contextual setter fields (role + current stages) and "as"/"to" interchangeably.
+# "set priority to X", "update location to X", "change current stages to a, b"
 _LEGACY_FIELD_UPDATE_RE = re.compile(
-    r"^(?:set|change|update)\s+(status|priority|location|employment\s+type)\s+to\s+(.+)$",
+    r"^(?:set|change|update)\s+"
+    r"(status|priority|location|employment\s+type|current\s+stages?|role)"
+    r"\s+(?:to|as)\s+(.+)$",
     re.IGNORECASE,
 )
 
@@ -435,7 +438,11 @@ def try_parse_v2(transcript: str, context: dict) -> ParseResult:
         )
 
     # ── 5. add note ───────────────────────────────────────────────────────────
-    m = _ADD_NOTE_RE.search(stripped)
+    # Anchor to the start of the (prefix-stripped) transcript so a note clause
+    # buried after a field update — e.g. "set priority to medium and add a note
+    # saying ..." — is NOT silently treated as note-only. Such mixed-intent
+    # transcripts fall through to the semantic extractor, which rejects them.
+    m = _ADD_NOTE_RE.match(stripped)
     if m:
         company_raw = m.group(1)
         role_raw = m.group(2)
@@ -908,6 +915,17 @@ def try_parse_v2(transcript: str, context: dict) -> ParseResult:
             if canonical is None:
                 return ParseMiss()
             return MutationPayload(operation=operation, target=target, changes=ApplicationChanges(employment_types=[canonical]))
+
+        if field_key in {"current stage", "current stages"}:
+            stages = _parse_stages(raw_value)
+            if stages is None:
+                return ParseMiss()
+            return MutationPayload(operation=operation, target=target, changes=ApplicationChanges(current_stages=stages))
+
+        if field_key == "role":
+            if not raw_value:
+                return ParseMiss()
+            return MutationPayload(operation=operation, target=target, changes=ApplicationChanges(role=raw_value))
 
     # ── 15. No anchor found ───────────────────────────────────────────────────
     return ParseMiss()

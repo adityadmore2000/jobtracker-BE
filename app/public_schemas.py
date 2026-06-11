@@ -89,6 +89,15 @@ TranscriptStatus = Literal[
 ]
 
 
+class PublicCollisionDTO(BaseModel):
+    kind: Literal["draft", "active_application", "archived_application"]
+    draft_id: int | None = None
+    application_id: int | None = None
+    company: str | None = None
+    role: str | None = None
+    archived: bool = False
+
+
 class PublicTranscriptResponse(BaseModel):
     status: TranscriptStatus
     message: str
@@ -102,3 +111,7 @@ class PublicTranscriptResponse(BaseModel):
     # New fields for controlled command layer
     note: PublicNoteDTO | None = None
     pending_command: dict[str, Any] | None = None
+    # Single-call semantic extractor: safe rephrasing suggestions (clickable chips).
+    suggested_phrasings: list[str] = []
+    # Structured collision metadata when a create command hit an existing row.
+    collision: PublicCollisionDTO | None = None
