@@ -320,6 +320,53 @@ async def discard_draft(draft_id: int, db: Session = Depends(get_db)) -> Respons
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@app.get("/drafts/{draft_id}", response_model=PublicApplicationDTO)
+async def get_draft(draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationDTO:
+    """Fetch a single persisted draft for direct URL addressing (/drafts/{id}).
+
+    404 if the row is missing OR is not a draft — a saved/archived application
+    id must not resolve through this route.
+    """
+    app_row = db.get(JobApplication, draft_id)
+    if app_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    if not app_row.is_draft:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Application {draft_id} is not a draft",
+        )
+    return to_public_application(app_row)
+
+
+@app.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_draft(draft_id: int, db: Session = Depends(get_db)) -> Response:
+    """Delete only a persisted draft row (REST-style alias of POST /drafts/{id}/discard).
+
+    Rejects saved-application ids with 404 so a non-draft can never be removed
+    through the draft route. Draft-linked notes/events cascade-delete via the
+    discard_draft dispatcher operation.
+    """
+    app_row = db.get(JobApplication, draft_id)
+    if app_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Draft {draft_id} not found")
+    if not app_row.is_draft:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Application {draft_id} is not a draft",
+        )
+
+    mutation = MutationPayload(
+        operation="discard_draft",
+        target=MutationTarget(draft_id=str(draft_id)),
+        changes=ApplicationChanges(),
+    )
+    result = dispatch(mutation, db)
+    if not result.success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.message)
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @app.get("/application-change-drafts/{change_draft_id}", response_model=PublicApplicationChangeDraftDTO)
 async def get_application_change_draft(change_draft_id: int, db: Session = Depends(get_db)) -> PublicApplicationChangeDraftDTO:
     cd = db.get(ApplicationChangeDraft, change_draft_id)
@@ -690,12 +737,17 @@ async def confirm_company_and_create_application(
     return application
 
 
-@app.get("/applications/{application_id}", response_model=JobApplicationRead)
-async def get_application(application_id: int, db: Session = Depends(get_db)) -> JobApplication:
+@app.get("/applications/{application_id}", response_model=PublicApplicationDTO)
+async def get_application(application_id: int, db: Session = Depends(get_db)) -> PublicApplicationDTO:
+    """Fetch a single application (saved or archived) for direct URL addressing.
+
+    Returns the scalar public DTO so it matches the GET /applications list shape
+    and the frontend Application type used by the route-addressable detail view.
+    """
     application = db.get(JobApplication, application_id)
     if application is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
-    return application
+    return to_public_application(application)
 
 
 @app.patch("/applications/{application_id}", response_model=JobApplicationRead)
