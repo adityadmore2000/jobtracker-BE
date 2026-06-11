@@ -102,3 +102,5 @@ class PublicTranscriptResponse(BaseModel):
     # New fields for controlled command layer
     note: PublicNoteDTO | None = None
     pending_command: dict[str, Any] | None = None
+    # Single-call semantic extractor: safe rephrasing suggestions (clickable chips).
+    suggested_phrasings: list[str] = []

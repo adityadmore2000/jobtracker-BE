@@ -411,3 +411,31 @@ def clarification_needed_response(
         pending_command=pending_command,
         warnings=[],
     )
+
+
+def suggestion_only_response(
+    message: str,
+    *,
+    clarification_question: str | None = None,
+    suggested_phrasings: list[str] | None = None,
+) -> PublicTranscriptResponse:
+    """Safe no-mutation response that offers clickable rephrasings.
+
+    Uses the ``unsupported`` status so the frontend never treats it as a mutation.
+    """
+    return PublicTranscriptResponse(
+        status="unsupported",
+        message=message,
+        clarification_question=clarification_question,
+        suggested_phrasings=suggested_phrasings or [],
+        warnings=[],
+    )
+
+
+def mixed_intent_response(message: str) -> PublicTranscriptResponse:
+    """Safe no-mutation response for a transcript that mixes a field update and a note."""
+    return PublicTranscriptResponse(
+        status="unsupported",
+        message=message,
+        warnings=[],
+    )

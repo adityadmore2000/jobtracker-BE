@@ -1,3 +1,4 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -36,7 +37,9 @@ from .public_schemas import PublicApplicationChangeDraftDTO, PublicApplicationDT
 from .role_resolution import find_application_by_company_role, normalize_role_name
 from .transcript_response_adapter import (
     clarification_needed_response,
+    mixed_intent_response,
     mutation_result_to_public_response,
+    suggestion_only_response,
     to_public_application,
     to_public_change_draft,
     to_public_transcript_response,
@@ -61,6 +64,19 @@ from .schemas import (
 from .fast_path_parser import ClarificationNeeded, ParseMiss, try_parse_v2
 from .semantic_interpreter import OllamaSemanticInterpreter, get_semantic_interpreter
 from .semantic_validation import interpret_transcript_command
+from .database_config import get_bool_env
+from .semantic_command_extractor import (
+    SemanticExtractorError,
+    extract_semantic_command_once,
+)
+from .semantic_command_pipeline import (
+    ClarificationOutcome,
+    DispatchOutcome,
+    MixedIntentOutcome,
+    SuggestionOutcome,
+    resolve_semantic_command,
+)
+from .semantic_command_continuation import resume_pending_command
 
 
 @asynccontextmanager
@@ -68,6 +84,8 @@ async def lifespan(_app: FastAPI):
     run_startup_migrations_if_enabled()
     yield
 
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Job Tracker API", lifespan=lifespan)
 HOTWORD_LIMIT = 100
@@ -434,6 +452,100 @@ def _build_applications_list(db: Session) -> list[dict]:
     return result
 
 
+def _build_extractor_context(parser_context: dict, db: Session) -> dict:
+    """Compact, advisory read-only context for the single-call extractor.
+
+    All identities are advisory. IDs are NEVER trusted — the pipeline re-resolves
+    and verifies every target against the DB.
+    """
+    active_draft = None
+    draft_id = parser_context.get("draft_id")
+    if draft_id is not None:
+        draft_row = db.get(JobApplication, int(draft_id))
+        if draft_row is not None and draft_row.is_draft:
+            active_draft = {"id": draft_row.id, "company": draft_row.company, "role": draft_row.role or ""}
+
+    active_application = None
+    active_app_id = parser_context.get("active_application_id")
+    if active_app_id is not None:
+        app_row = db.get(JobApplication, int(active_app_id))
+        if app_row is not None and not app_row.is_draft and app_row.archived_at is None:
+            active_application = {"id": app_row.id, "company": app_row.company, "role": app_row.role or ""}
+
+    known = [
+        {"application_id": a["id"], "company": a["company"], "role": a["role"]}
+        for a in parser_context.get("applications", [])
+        if not a.get("archived_at")
+    ]
+    return {
+        "active_draft": active_draft,
+        "active_application": active_application,
+        "known_applications": known,
+    }
+
+
+def _validate_suggestions(suggestions: list[str], parser_context: dict) -> list[str]:
+    """Level-2 safety: keep only suggestions that parse safely via dry-run.
+
+    try_parse_v2 is pure (no DB writes); we never dispatch the parsed result.
+    Suggestions that do not parse are dropped.
+    """
+    safe: list[str] = []
+    for phrase in suggestions:
+        # Static generic examples are illustrative grammar hints, always safe to
+        # show even though they need a context to actually dispatch.
+        if phrase in _GENERIC_SUGGESTION_EXAMPLES:
+            safe.append(phrase)
+            continue
+        try:
+            parsed = try_parse_v2(phrase, parser_context)
+        except Exception:  # pragma: no cover - defensive
+            continue
+        if isinstance(parsed, MutationPayload):
+            safe.append(phrase)
+    return safe
+
+
+def _outcome_to_response(outcome, parser_context: dict, db: Session) -> PublicTranscriptResponse:
+    """Map a pipeline/continuation outcome to the public response (dispatch if needed)."""
+    if isinstance(outcome, DispatchOutcome):
+        mutation_result = dispatch(outcome.payload, db)
+        logger.info(
+            "semantic_single_extractor_dispatch operation=%s target=%s",
+            outcome.payload.operation,
+            outcome.payload.target.model_dump(exclude_none=True),
+        )
+        return mutation_result_to_public_response(mutation_result)
+    if isinstance(outcome, ClarificationOutcome):
+        return clarification_needed_response(outcome.question, outcome.pending_command)
+    if isinstance(outcome, MixedIntentOutcome):
+        logger.info("semantic_single_extractor_rejected reason=mixed_intent")
+        return mixed_intent_response(outcome.message)
+    if isinstance(outcome, SuggestionOutcome):
+        suggestions = _validate_suggestions(outcome.suggested_phrasings, parser_context)
+        if outcome.suggested_phrasings and not suggestions:
+            # No proposed phrasing parsed safely — fall back to generic examples.
+            suggestions = list(_GENERIC_SUGGESTION_EXAMPLES)
+        logger.info("semantic_single_extractor_suggestion phrases=%s", suggestions)
+        return suggestion_only_response(
+            outcome.message,
+            clarification_question=outcome.clarification_question,
+            suggested_phrasings=suggestions,
+        )
+    return unsupported_command_response()
+
+
+_GENERIC_SUGGESTION_EXAMPLES = [
+    "set priority as medium",
+    "set location as on-site",
+    "add a note saying recruiter replied",
+]
+
+
+def _use_single_extractor() -> bool:
+    return get_bool_env("USE_SINGLE_SEMANTIC_EXTRACTOR", default=True)
+
+
 @app.post("/transcript/parse", response_model=PublicTranscriptResponse)
 async def parse_transcript_command(
     payload: TranscriptParseRequest,
@@ -446,26 +558,49 @@ async def parse_transcript_command(
     parser_context = dict(raw_context)
     parser_context["applications"] = applications_list
 
-    # Controlled parser: try_parse_v2 must run first.
-    # It returns MutationPayload (dispatch), ClarificationNeeded (surface question),
-    # or ParseMiss (no supported anchor — block mutation LLM path).
+    # ── Step 0. Consume a pending clarification, if present. ──────────────────
+    # Continuation runs before normal parsing and never reaches the LLM.
+    pending_command = raw_context.get("pending_command")
+    continuation = resume_pending_command(pending_command, payload.transcript, parser_context, db)
+    if continuation is not None:
+        logger.info("transcript_parse path=clarification_continuation")
+        return _outcome_to_response(continuation, parser_context, db)
+
+    # ── Step 1. Deterministic fast paths (try_parse_v2 runs first). ───────────
     controlled_result = try_parse_v2(payload.transcript, parser_context)
 
     if isinstance(controlled_result, MutationPayload):
+        logger.info("transcript_parse path=fast_path operation=%s", controlled_result.operation)
         mutation_result = dispatch(controlled_result, db)
         return mutation_result_to_public_response(mutation_result)
 
     if isinstance(controlled_result, ClarificationNeeded):
+        logger.info("transcript_parse path=fast_path_clarification")
         return clarification_needed_response(
             controlled_result.question,
             controlled_result.pending_command or None,
         )
 
-    # ParseMiss: no supported command anchor found.
-    # The legacy LLM pipeline is intentionally NOT called for mutations.
-    # USE_LEGACY_SEMANTIC_MUTATIONS=0 (default disabled).
+    # ── Step 2. ParseMiss → single-call semantic extractor (feature-flagged). ─
     assert isinstance(controlled_result, ParseMiss)
-    return unsupported_command_response()
+
+    if not _use_single_extractor():
+        # Flag disabled → preserve the prior safe behavior. The legacy
+        # dual-output LLM pipeline is never invoked.
+        logger.info("transcript_parse path=unsupported_flag_off")
+        return unsupported_command_response()
+
+    extractor_context = _build_extractor_context(parser_context, db)
+    try:
+        command, _metrics = extract_semantic_command_once(payload.transcript, extractor_context)
+    except SemanticExtractorError as exc:
+        # Ollama unavailable / invalid JSON / schema violation / timeout.
+        logger.info("semantic_single_extractor_rejected reason=%s", type(exc).__name__)
+        return unsupported_command_response()
+
+    outcome = resolve_semantic_command(command, parser_context, db)
+    logger.info("transcript_parse path=single_extractor intent=%s", command.intent)
+    return _outcome_to_response(outcome, parser_context, db)
 
 
 @app.post("/applications", response_model=JobApplicationRead, status_code=status.HTTP_201_CREATED)

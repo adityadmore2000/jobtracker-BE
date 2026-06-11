@@ -135,6 +135,31 @@ assert _PRIORITY_ALIAS_TARGETS.issubset(set(ALLOWED_PRIORITIES)), (
 )
 
 
+def _normalize_alias_key(value: str) -> str:
+    """Collapse whitespace, casefold, and treat -/_ as spaces for alias lookup."""
+    return " ".join(value.strip().replace("-", " ").replace("_", " ").casefold().split())
+
+
+def normalize_priority_value(value: str) -> str | None:
+    return PRIORITY_ALIASES.get(_normalize_alias_key(value))
+
+
+def normalize_location_value(value: str) -> str | None:
+    return LOCATION_ALIASES.get(_normalize_alias_key(value))
+
+
+def normalize_employment_type_value(value: str) -> str | None:
+    return EMPLOYMENT_TYPE_ALIASES.get(_normalize_alias_key(value))
+
+
+def normalize_current_stage_value(value: str) -> str | None:
+    normalized = _normalize_alias_key(value)
+    for stage in ALLOWED_CURRENT_STAGES:
+        if _normalize_alias_key(stage) == normalized:
+            return stage
+    return None
+
+
 EVENT_TYPES = {
     "application_saved",
     "field_changed",
