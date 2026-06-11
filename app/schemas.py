@@ -8,9 +8,10 @@ from .constants import (
     ALLOWED_EMPLOYMENT_TYPES,
     ALLOWED_LOCATIONS,
     ALLOWED_PRIORITIES,
-    ALLOWED_ROLES,
     STATUS_OPTIONS,
+    normalize_status_value,
 )
+from .semantic_schemas import SemanticInterpreterMetrics, SemanticToolCallProposal
 
 http_url_adapter = TypeAdapter(HttpUrl)
 
@@ -30,12 +31,18 @@ def validate_optional_allowed(value: str, allowed: list[str], field_name: str) -
     return value
 
 
+def normalize_role_title(value: str) -> str:
+    normalized = " ".join(value.strip().split())
+    return normalized
+
+
 def normalize_string(value: Any) -> Any:
     return "" if value is None else value
 
 
 class JobApplicationBase(BaseModel):
     company: str = Field(min_length=1)
+    role: str = ""
     roles_json: list[str] = Field(default_factory=list)
     employment_types_json: list[str] = Field(default_factory=list)
     job_link: str = ""
@@ -55,10 +62,15 @@ class JobApplicationBase(BaseModel):
             raise ValueError("company is required")
         return stripped
 
+    @field_validator("role")
+    @classmethod
+    def normalize_role_field(cls, value: str) -> str:
+        return " ".join(value.strip().split())
+
     @field_validator("roles_json")
     @classmethod
-    def roles_are_allowed(cls, values: list[str]) -> list[str]:
-        return validate_allowed_list(values, ALLOWED_ROLES, "roles_json")
+    def roles_are_titles(cls, values: list[str]) -> list[str]:
+        return [normalize_role_title(v) for v in values if v.strip()]
 
     @field_validator("employment_types_json")
     @classmethod
@@ -80,6 +92,18 @@ class JobApplicationBase(BaseModel):
     def priority_is_allowed(cls, value: str | None) -> str:
         return validate_optional_allowed(normalize_string(value), ALLOWED_PRIORITIES, "priority")
 
+    @field_validator("status")
+    @classmethod
+    def status_is_allowed(cls, value: str | None) -> str:
+        normalized = normalize_string(value)
+        if not normalized:
+            return ""
+        canonical = normalize_status_value(normalized)
+        if canonical is None:
+            allowed_values = ", ".join(STATUS_OPTIONS)
+            raise ValueError(f"status must be empty or one of: {allowed_values}")
+        return canonical
+
     @field_validator("job_link")
     @classmethod
     def job_link_is_url_or_empty(cls, value: str | None) -> str:
@@ -94,9 +118,35 @@ class JobApplicationCreate(JobApplicationBase):
     pass
 
 
+class ApplicationCreateCandidateRequest(JobApplicationBase):
+    raw_transcript: str | None = None
+    original_extracted_company_name: str | None = None
+    audio_reference: str | None = None
+
+    @field_validator("raw_transcript", "original_extracted_company_name", "audio_reference")
+    @classmethod
+    def normalize_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        return stripped or None
+
+
+class ApplicationCompanyConfirmationRequest(ApplicationCreateCandidateRequest):
+    confirmed_company_name: str = Field(min_length=1)
+
+    @field_validator("confirmed_company_name")
+    @classmethod
+    def confirmed_company_name_required(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("confirmed_company_name is required")
+        return stripped
+
+
 class JobApplicationUpdate(BaseModel):
     company: str | None = Field(default=None, min_length=1)
-    roles_json: list[str] | None = None
+    role: str | None = None
     employment_types_json: list[str] | None = None
     job_link: str | None = None
     location: str | None = None
@@ -117,10 +167,12 @@ class JobApplicationUpdate(BaseModel):
             raise ValueError("company is required")
         return stripped
 
-    @field_validator("roles_json")
+    @field_validator("role")
     @classmethod
-    def roles_are_allowed(cls, values: list[str] | None) -> list[str] | None:
-        return None if values is None else validate_allowed_list(values, ALLOWED_ROLES, "roles_json")
+    def normalize_role_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return " ".join(value.strip().split())
 
     @field_validator("employment_types_json")
     @classmethod
@@ -145,6 +197,20 @@ class JobApplicationUpdate(BaseModel):
         if value is None:
             return value
         return validate_optional_allowed(value, ALLOWED_PRIORITIES, "priority")
+
+    @field_validator("status")
+    @classmethod
+    def status_is_allowed(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        canonical = normalize_status_value(stripped)
+        if canonical is None:
+            allowed_values = ", ".join(STATUS_OPTIONS)
+            raise ValueError(f"status must be empty or one of: {allowed_values}")
+        return canonical
 
     @field_validator("job_link")
     @classmethod
@@ -198,8 +264,44 @@ class BrowserContextResponse(BaseModel):
     context: BrowserContextRead | None
 
 
+class LiveKitTokenRequest(BaseModel):
+    room_name: str = "job-tracker-local"
+
+    @field_validator("room_name", mode="before")
+    @classmethod
+    def normalize_room_name(cls, value: str | None) -> str:
+        if value is None:
+            return "job-tracker-local"
+        stripped = value.strip()
+        return stripped or "job-tracker-local"
+
+
+class LiveKitTokenResponse(BaseModel):
+    url: str
+    room_name: str
+    participant_identity: str
+    access_token: str
+    expires_at: datetime
+
+
+class ApplicationCreateCandidateRequiresConfirmation(BaseModel):
+    status: Literal["confirmation_required"]
+    requires_confirmation: Literal[True] = True
+    candidate: ApplicationCreateCandidateRequest
+
+
+class ApplicationCreateCandidateCreated(BaseModel):
+    status: Literal["created"]
+    requires_confirmation: Literal[False] = False
+    application: JobApplicationRead
+
+
+ApplicationCreateCandidateResponse = ApplicationCreateCandidateRequiresConfirmation | ApplicationCreateCandidateCreated
+
+
 class TranscriptParseRequest(BaseModel):
     transcript: str = Field(min_length=1)
+    context: dict[str, Any] | None = None
 
     @field_validator("transcript")
     @classmethod
@@ -210,74 +312,105 @@ class TranscriptParseRequest(BaseModel):
         return stripped
 
 
-class JobDraftPatch(BaseModel):
+class SemanticTranscriptResponse(BaseModel):
+    status: Literal["preview", "clarification_required", "unsupported", "unavailable"]
+    operation: Literal["create", "update", "pending_changes", "none"]
+    raw_transcript: str
+    proposal: SemanticToolCallProposal
+    application_id: int | None = None
+    draft_id: str | None = None
+    draft: JobApplicationBase | None = None
+    draft_dict: dict | None = None  # persisted draft row dict — used for id-accurate public DTO
+    drafts: list[JobApplicationCreate] = Field(default_factory=list)
+    change_draft: dict | None = None
+    warnings: list[str] = Field(default_factory=list)
+    needs_confirmation: bool = False
+    confirmation_kind: Literal["none", "multi_application", "context"] = "none"
+    clarification_question: str | None = None
+    interpreter_metrics: SemanticInterpreterMetrics | None = None
+
+
+class DraftPatchRequest(BaseModel):
+    """Public-facing draft patch payload."""
     company: str | None = None
-    roles_add: list[str] = Field(default_factory=list)
-    roles_remove: list[str] = Field(default_factory=list)
-    employment_types_add: list[str] = Field(default_factory=list)
-    employment_types_remove: list[str] = Field(default_factory=list)
+    role: str | None = None
+    employment_types: list[str] | None = None
     job_link: str | None = None
-    use_latest_browser_url: bool = False
     location: str | None = None
     status: str | None = None
-    current_stages_add: list[str] = Field(default_factory=list)
-    current_stages_remove: list[str] = Field(default_factory=list)
+    current_stages: list[str] | None = None
     priority: str | None = None
     engaged_days: int | None = Field(default=None, ge=0)
     next_action: str | None = None
-    comments_replace: str | None = None
-    comments_append: str | None = None
+    comments: str | None = None
 
-    @field_validator("roles_add", "roles_remove")
+    @field_validator("company")
     @classmethod
-    def draft_roles_are_allowed(cls, values: list[str]) -> list[str]:
-        return validate_allowed_list(values, ALLOWED_ROLES, "roles")
-
-    @field_validator("employment_types_add", "employment_types_remove")
-    @classmethod
-    def draft_employment_types_are_allowed(cls, values: list[str]) -> list[str]:
-        return validate_allowed_list(values, ALLOWED_EMPLOYMENT_TYPES, "employment_types")
-
-    @field_validator("current_stages_add", "current_stages_remove")
-    @classmethod
-    def draft_current_stages_are_allowed(cls, values: list[str]) -> list[str]:
-        return validate_allowed_list(values, ALLOWED_CURRENT_STAGES, "current_stages")
-
-    @field_validator("job_link")
-    @classmethod
-    def draft_job_link_is_url_or_empty(cls, value: str | None) -> str | None:
+    def company_required_when_present(cls, value: str | None) -> str | None:
         if value is None:
             return value
-        value = value.strip()
-        if not value:
-            return None
-        http_url_adapter.validate_python(value)
-        return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("company is required")
+        return stripped
+
+    @field_validator("role")
+    @classmethod
+    def normalize_role_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return " ".join(value.strip().split())
+
+    @field_validator("employment_types")
+    @classmethod
+    def employment_types_are_allowed(cls, values: list[str] | None) -> list[str] | None:
+        return None if values is None else validate_allowed_list(values, ALLOWED_EMPLOYMENT_TYPES, "employment_types")
+
+    @field_validator("current_stages")
+    @classmethod
+    def current_stages_are_allowed(cls, values: list[str] | None) -> list[str] | None:
+        return None if values is None else validate_allowed_list(values, ALLOWED_CURRENT_STAGES, "current_stages")
 
     @field_validator("location")
     @classmethod
-    def draft_location_is_allowed(cls, value: str | None) -> str | None:
+    def location_is_allowed(cls, value: str | None) -> str | None:
         if value is None:
             return value
         return validate_optional_allowed(value, ALLOWED_LOCATIONS, "location")
 
-    @field_validator("status")
-    @classmethod
-    def draft_status_is_allowed(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        return validate_optional_allowed(value, STATUS_OPTIONS, "status")
-
     @field_validator("priority")
     @classmethod
-    def draft_priority_is_allowed(cls, value: str | None) -> str | None:
+    def priority_is_allowed(cls, value: str | None) -> str | None:
         if value is None:
             return value
         return validate_optional_allowed(value, ALLOWED_PRIORITIES, "priority")
 
+    @field_validator("status")
+    @classmethod
+    def status_is_allowed(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        canonical = normalize_status_value(stripped)
+        if canonical is None:
+            allowed_values = ", ".join(STATUS_OPTIONS)
+            raise ValueError(f"status must be empty or one of: {allowed_values}")
+        return canonical
 
-class ParsedTranscriptCommand(BaseModel):
-    intent: Literal["ADD_APPLICATION", "PATCH_ACTIVE_DRAFT", "SAVE_ACTIVE_DRAFT", "CANCEL_ACTIVE_DRAFT", "UNKNOWN"]
-    patch: JobDraftPatch
-    raw_transcript: str
-    warnings: list[str] = Field(default_factory=list)
+    @field_validator("job_link")
+    @classmethod
+    def job_link_is_url_or_empty(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if not value:
+            return ""
+        http_url_adapter.validate_python(value)
+        return value
+
+
+class AsrHotwordsResponse(BaseModel):
+    hotwords: list[str]
+    limit: int
