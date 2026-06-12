@@ -1,0 +1,880 @@
+{
+  "model": "llama3.2:3b",
+  "timestamp": "20260612_161041",
+  "total_cases": 24,
+  "total_pass": 20,
+  "overall_pct": 83.3,
+  "category_scores": {
+    "direct": {
+      "pass": 5,
+      "total": 6
+    },
+    "indirect": {
+      "pass": 8,
+      "total": 11
+    },
+    "informational": {
+      "pass": 5,
+      "total": 5
+    },
+    "ambiguous": {
+      "pass": 2,
+      "total": 2
+    }
+  },
+  "median_lat_ms": 3532.2,
+  "p90_lat_ms": 5038.0,
+  "results": [
+    {
+      "index": 1,
+      "category": "direct",
+      "phrase": "I applied for data scientist role at Spotify",
+      "outcome": "PASS",
+      "latency_ms": 3686.8,
+      "expected_intent": "create_application",
+      "actual_intent": "create_application",
+      "raw_result": {
+        "intent": "create_application",
+        "target": {
+          "company": "Spotify",
+          "role": "data scientist",
+          "application_id": null
+        },
+        "changes": {
+          "status": "applied",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Spotify to medium",
+          "add application for data scientist at Spotify",
+          "apply for data scientist role at Spotify"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 2,
+      "category": "direct",
+      "phrase": "add application for software engineer at Netflix",
+      "outcome": "PASS",
+      "latency_ms": 3149.9,
+      "expected_intent": "create_application",
+      "actual_intent": "create_application",
+      "raw_result": {
+        "intent": "create_application",
+        "target": {
+          "company": "Netflix",
+          "role": "software engineer",
+          "application_id": null
+        },
+        "changes": {
+          "status": "applied",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Netflix to medium",
+          "add application for software engineer at Netflix",
+          "submit application for software engineer role at Netflix"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 3,
+      "category": "direct",
+      "phrase": "For Spotify data scientist application, set status to rejected",
+      "outcome": "FAIL",
+      "latency_ms": 3111.3,
+      "expected_intent": "update_application",
+      "actual_intent": "archive_application",
+      "raw_result": {
+        "intent": "archive_application",
+        "target": {
+          "company": "Spotify",
+          "role": "data scientist",
+          "application_id": null
+        },
+        "changes": {
+          "status": "rejected",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set status of Spotify data scientist to rejected",
+          "reject Spotify data scientist application",
+          "Spotify data scientist application rejected"
+        ]
+      },
+      "notes": [
+        "Intent: expected 'update_application', got 'archive_application'"
+      ]
+    },
+    {
+      "index": 4,
+      "category": "direct",
+      "phrase": "For Google AI Engineer application, set priority to high",
+      "outcome": "PASS",
+      "latency_ms": 3145.5,
+      "expected_intent": "update_application",
+      "actual_intent": "update_application",
+      "raw_result": {
+        "intent": "update_application",
+        "target": {
+          "company": "Google",
+          "role": "AI Engineer",
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": "HIGH",
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Google to high",
+          "make it high priority for Google AI Engineer application",
+          "increase priority for Google AI Engineer role"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 5,
+      "category": "direct",
+      "phrase": "add a note for Spotify saying recruiter reached out",
+      "outcome": "PASS",
+      "latency_ms": 2895.6,
+      "expected_intent": "append_note",
+      "actual_intent": "append_note",
+      "raw_result": {
+        "intent": "append_note",
+        "target": {
+          "company": "Spotify",
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": "recruiter reached out",
+        "clarification": null,
+        "suggested_phrasings": [
+          "add a note saying recruiter reached out",
+          "note that recruiter reached out",
+          "I connected with their recruiter, add that as a note"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 6,
+      "category": "direct",
+      "phrase": "archive the Netflix application",
+      "outcome": "PASS",
+      "latency_ms": 4691.5,
+      "expected_intent": "archive_application",
+      "actual_intent": "archive_application",
+      "raw_result": {
+        "intent": "archive_application",
+        "target": {
+          "company": "Netflix",
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": "in_touch",
+          "priority": "LOW",
+          "location_mode": "remote",
+          "employment_types": [],
+          "current_stages": [],
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Netflix to LOW",
+          "archive the Netflix application for full-time role",
+          "remove from active list"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 7,
+      "category": "indirect",
+      "phrase": "i should track at Spotify for data scientist role",
+      "outcome": "PASS",
+      "latency_ms": 3178.7,
+      "expected_intent": "create_application",
+      "actual_intent": "create_application",
+      "raw_result": {
+        "intent": "create_application",
+        "target": {
+          "company": "Spotify",
+          "role": "data scientist",
+          "application_id": null
+        },
+        "changes": {
+          "status": "applied",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "add application for data scientist at Spotify",
+          "track at Spotify for data scientist role",
+          "apply for data scientist position at Spotify"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 8,
+      "category": "indirect",
+      "phrase": "been meaning to add the Netflix software engineer role",
+      "outcome": "PASS",
+      "latency_ms": 3206.2,
+      "expected_intent": "create_application",
+      "actual_intent": "create_application",
+      "raw_result": {
+        "intent": "create_application",
+        "target": {
+          "company": "Netflix",
+          "role": "software engineer",
+          "application_id": null
+        },
+        "changes": {
+          "status": "applied",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "add the Netflix software engineer role",
+          "apply for the Netflix software engineer position",
+          "submit an application for the Netflix software engineer role"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 9,
+      "category": "indirect",
+      "phrase": "i think i applied to Google last week",
+      "outcome": "FAIL",
+      "latency_ms": 2872.9,
+      "expected_intent": "create_application",
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": "Google",
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": "applied",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Google to medium",
+          "add application for Google",
+          "I applied for Google last week"
+        ]
+      },
+      "notes": [
+        "Intent: expected 'create_application', got 'unsupported'"
+      ]
+    },
+    {
+      "index": 10,
+      "category": "indirect",
+      "phrase": "the Spotify one should be higher priority",
+      "outcome": "PASS",
+      "latency_ms": 3187.7,
+      "expected_intent": "update_application",
+      "actual_intent": "update_application",
+      "raw_result": {
+        "intent": "update_application",
+        "target": {
+          "company": "Spotify",
+          "role": "the Spotify one",
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": "HIGH",
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Spotify to high",
+          "make the Spotify application higher priority",
+          "increase the priority of the Spotify job"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 11,
+      "category": "indirect",
+      "phrase": "For Spotify, bump it to high priority",
+      "outcome": "PASS",
+      "latency_ms": 4439.6,
+      "expected_intent": "update_application",
+      "actual_intent": "update_application",
+      "raw_result": {
+        "intent": "update_application",
+        "target": {
+          "company": "Spotify",
+          "role": "bump it to high priority",
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": "HIGH",
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "bump it to high priority",
+          "increase priority to high",
+          "set priority to high"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 12,
+      "category": "indirect",
+      "phrase": "Netflix just got back to me, I'm in touch with them now",
+      "outcome": "PASS",
+      "latency_ms": 5271.0,
+      "expected_intent": "update_application",
+      "actual_intent": "update_application",
+      "raw_result": {
+        "intent": "update_application",
+        "target": {
+          "company": "Netflix",
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": "in_touch",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": [],
+          "current_stages": [],
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": "Netflix just got back to me, I'm in touch with them now",
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Netflix to medium",
+          "update Netflix application status to in_touch",
+          "follow up on Netflix job application"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 13,
+      "category": "indirect",
+      "phrase": "the Google role is remote by the way",
+      "outcome": "PASS",
+      "latency_ms": 3146.3,
+      "expected_intent": "update_application",
+      "actual_intent": "update_application",
+      "raw_result": {
+        "intent": "update_application",
+        "target": {
+          "company": "Google",
+          "role": "the Google role",
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": null,
+          "location_mode": "remote",
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set location of Google to remote",
+          "make Google role remote",
+          "update Google role to be remote"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 14,
+      "category": "indirect",
+      "phrase": "Spotify turned me down",
+      "outcome": "FAIL",
+      "latency_ms": 5024.5,
+      "expected_intent": "update_application",
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": "Spotify",
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": "rejected",
+          "priority": "LOW",
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": "Spotify turned me down",
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Spotify to LOW",
+          "Spotify application status set to rejected",
+          "Spotify turned down the applicant"
+        ]
+      },
+      "notes": [
+        "Intent: expected 'update_application', got 'unsupported'"
+      ]
+    },
+    {
+      "index": 15,
+      "category": "indirect",
+      "phrase": "got accepted at Netflix!",
+      "outcome": "ERROR",
+      "latency_ms": 2787.4,
+      "expected_intent": "update_application",
+      "actual_intent": null,
+      "raw_result": null,
+      "notes": [
+        "Extractor failed or returned unparseable output"
+      ]
+    },
+    {
+      "index": 16,
+      "category": "indirect",
+      "phrase": "jot down for Spotify that the recruiter said they'll follow up Friday",
+      "outcome": "PASS",
+      "latency_ms": 4835.1,
+      "expected_intent": "append_note",
+      "actual_intent": "append_note",
+      "raw_result": {
+        "intent": "append_note",
+        "target": {
+          "company": null,
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": "jot down for Spotify that the recruiter said they'll follow up Friday",
+        "clarification": null,
+        "suggested_phrasings": [
+          "set next action for Spotify to follow up Friday",
+          "add note that recruiter will follow up on Friday",
+          "update application status to follow-up"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 17,
+      "category": "indirect",
+      "phrase": "i'm not pursuing Netflix anymore, take it off my active list",
+      "outcome": "PASS",
+      "latency_ms": 3011.4,
+      "expected_intent": "archive_application",
+      "actual_intent": "archive_application",
+      "raw_result": {
+        "intent": "archive_application",
+        "target": {
+          "company": "Netflix",
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": "in_touch",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Netflix to LOW",
+          "remove from active list for Netflix",
+          "deactivate application for Netflix"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 18,
+      "category": "informational",
+      "phrase": "how many applications do I have?",
+      "outcome": "SAFE",
+      "latency_ms": 4252.5,
+      "expected_intent": null,
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": null,
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of applications to unknown",
+          "check application status",
+          "view number of active applications"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 19,
+      "category": "informational",
+      "phrase": "what's the status of my Spotify application?",
+      "outcome": "SAFE",
+      "latency_ms": 3745.1,
+      "expected_intent": null,
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": null,
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": "in_touch",
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Spotify to LOW",
+          "check status of Spotify application",
+          "get Spotify job status"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 20,
+      "category": "informational",
+      "phrase": "show me all my applications",
+      "outcome": "SAFE",
+      "latency_ms": 4588.2,
+      "expected_intent": null,
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": null,
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "show me my applications",
+          "list all my job applications",
+          "view my current applications"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 21,
+      "category": "informational",
+      "phrase": "which ones are high priority?",
+      "outcome": "SAFE",
+      "latency_ms": 1665.3,
+      "expected_intent": null,
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": null,
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": null,
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of all applications to high",
+          "mark all applications as high priority",
+          "make all applications high priority"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 22,
+      "category": "informational",
+      "phrase": "have I heard back from Netflix?",
+      "outcome": "SAFE",
+      "latency_ms": 5192.7,
+      "expected_intent": null,
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": "Netflix",
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": "in_touch",
+          "priority": "MEDIUM",
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": "recruiter replied",
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Netflix to medium",
+          "add a note saying recruiter replied",
+          "check status of Netflix application"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 23,
+      "category": "ambiguous",
+      "phrase": "do something with Spotify",
+      "outcome": "PASS",
+      "latency_ms": 3532.2,
+      "expected_intent": "unsupported",
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": null,
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": "MEDIUM",
+          "location_mode": "on-site",
+          "employment_types": [
+            "Full Time"
+          ],
+          "current_stages": [
+            "Tailored"
+          ],
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of Spotify to medium",
+          "add application for Spotify role at Spotify",
+          "make it onsite, full-time, priority high"
+        ]
+      },
+      "notes": []
+    },
+    {
+      "index": 24,
+      "category": "ambiguous",
+      "phrase": "hm",
+      "outcome": "PASS",
+      "latency_ms": 5038.0,
+      "expected_intent": "unsupported",
+      "actual_intent": "unsupported",
+      "raw_result": {
+        "intent": "unsupported",
+        "target": {
+          "company": null,
+          "role": null,
+          "application_id": null
+        },
+        "changes": {
+          "status": null,
+          "priority": "MEDIUM",
+          "location_mode": null,
+          "employment_types": null,
+          "current_stages": null,
+          "job_link": null,
+          "engaged_days": null,
+          "next_action": null,
+          "comments": null
+        },
+        "note": null,
+        "clarification": null,
+        "suggested_phrasings": [
+          "set priority of unknown to medium",
+          "add note about unknown",
+          "update application details"
+        ]
+      },
+      "notes": []
+    }
+  ]
+}
