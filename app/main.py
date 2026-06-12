@@ -535,15 +535,13 @@ def _build_extractor_context(parser_context: dict, db: Session) -> dict:
         if app_row is not None and not app_row.is_draft and app_row.archived_at is None:
             active_application = {"id": app_row.id, "company": app_row.company, "role": app_row.role or ""}
 
-    known = [
-        {"application_id": a["id"], "company": a["company"], "role": a["role"]}
-        for a in parser_context.get("applications", [])
-        if not a.get("archived_at")
-    ]
+    # Note: the full active-applications list is deliberately NOT passed to the
+    # extractor. Dumping every company into the prompt polluted target resolution
+    # (short/ambiguous names matched the wrong application). The pipeline still
+    # resolves and verifies every target against the DB downstream.
     return {
         "active_draft": active_draft,
         "active_application": active_application,
-        "known_applications": known,
     }
 
 

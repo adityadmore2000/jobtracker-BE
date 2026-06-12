@@ -27,6 +27,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from .constants import (
+    ALLOWED_EMPLOYMENT_TYPES,
     normalize_current_stage_value,
     normalize_employment_type_value,
     normalize_location_value,
@@ -113,7 +114,35 @@ class _NormalizedChanges:
     invalid: list[str]  # human-readable descriptions of fields that failed
 
 
+def _reconcile_location_employment_mixup(raw: SemanticChanges) -> SemanticChanges:
+    """Repair an employment-type value the model misplaced into ``location_mode``.
+
+    llama3.2:3b often emits ``location_mode='full-time'`` (an employment type, not
+    a location) alongside the correct ``employment_types=['Full Time']``. Left as
+    is, the invalid location fails the whole command. When location_mode is not a
+    valid location but IS a valid employment type, drop it from location (folding
+    it into employment_types when absent) so the rest of the command survives.
+    """
+    location = _clean_str(raw.location_mode)
+    if location is None or normalize_location_value(location) is not None:
+        return raw
+
+    canonical_et = normalize_employment_type_value(location)
+    if canonical_et is None or canonical_et not in ALLOWED_EMPLOYMENT_TYPES:
+        return raw
+
+    existing = raw.employment_types or []
+    existing_canonical = {normalize_employment_type_value(e) for e in existing}
+    if canonical_et in existing_canonical:
+        # Already captured correctly elsewhere — just drop the bad location.
+        return raw.model_copy(update={"location_mode": None})
+
+    logger.info("semantic_single_extractor_reconcile location=%r -> employment_type=%r", location, canonical_et)
+    return raw.model_copy(update={"location_mode": None, "employment_types": [*existing, location]})
+
+
 def _normalize_and_validate_changes(raw: SemanticChanges) -> _NormalizedChanges:
+    raw = _reconcile_location_employment_mixup(raw)
     invalid: list[str] = []
     out = ApplicationChanges()
 
@@ -468,13 +497,55 @@ def _handle_update(cmd: SemanticCommand, context: dict, db: Session) -> Pipeline
     return DispatchOutcome(payload)
 
 
-def _handle_append_note(cmd: SemanticCommand, context: dict, db: Session) -> PipelineOutcome:
+def _salvage_note_from_comments(cmd: SemanticCommand) -> tuple[str | None, SemanticChanges]:
+    """Recover note prose the model mis-routed into ``changes.comments``.
+
+    Small local models (llama3.2:3b) frequently emit an ``append_note`` intent but
+    place the note text in ``changes.comments`` instead of the top-level ``note``
+    field. When the intent is unambiguously a note and comments is the ONLY field
+    populated, treat that comments value as the note and clear it from changes —
+    so the note is appended rather than the whole command being dropped.
+
+    Returns (note_text, residual_changes). residual_changes has comments cleared
+    when salvage applied, otherwise the original changes unchanged.
+    """
     note = _clean_str(cmd.note)
+    if note:
+        return note, cmd.changes
+
+    comments = _clean_str(cmd.changes.comments)
+    if not comments:
+        return None, cmd.changes
+
+    # Only salvage when comments is the sole MEANINGFUL change. Empty lists
+    # (employment_types: [], current_stages: []) the model emits as filler do not
+    # count; a genuine field value does and must fall through to MixedIntent.
+    others = cmd.changes.model_copy(update={"comments": None})
+    if _changes_has_meaningful_value(others):
+        return None, cmd.changes
+
+    return comments, cmd.changes.model_copy(update={"comments": None})
+
+
+def _changes_has_meaningful_value(changes: SemanticChanges) -> bool:
+    """True when any change field holds a real value (empty lists do not count)."""
+    for f in (
+        "status", "priority", "location_mode", "job_link",
+        "engaged_days", "next_action", "comments",
+    ):
+        if getattr(changes, f) is not None:
+            return True
+    return bool(changes.employment_types) or bool(changes.current_stages)
+
+
+def _handle_append_note(cmd: SemanticCommand, context: dict, db: Session) -> PipelineOutcome:
+    note, residual_changes = _salvage_note_from_comments(cmd)
     if not note:
         return SuggestionOutcome(
             message="I could not find any note text.",
             suggested_phrasings=["add a note saying recruiter replied"],
         )
+    cmd = cmd.model_copy(update={"changes": residual_changes})
     norm = _normalize_and_validate_changes(cmd.changes)
     if _changes_has_any(norm.changes) or norm.invalid:
         # Note intent must not carry field updates.
