@@ -75,6 +75,15 @@ _SYSTEM_PROMPT = (
     "- employment_types and current_stages are always JSON arrays.\n"
     "- Keep field labels out of values (no 'role:', 'priority:', 'set', 'to' inside a value).\n"
     "\n"
+    "CRITICAL: intent MUST be exactly one of the five literals "
+    "create_application | update_application | append_note | archive_application | unsupported. "
+    "NEVER put a status, priority, or any other value in intent (e.g. intent is never 'applied', "
+    "'accepted', 'rejected', or 'high'). A status like 'accepted' goes in changes.status, not intent.\n"
+    "\n"
+    "Understand intent from MEANING, not keywords. People phrase the same action many ways — direct "
+    "('set status to rejected'), indirect ('they turned me down'), casual ('got the offer!'), or "
+    "incomplete. Map the underlying action regardless of phrasing.\n"
+    "\n"
     "Intent selection:\n"
     "- 'I applied for X role at Y' / 'I have applied for X at Y' / 'add application for X at Y' "
     "→ intent=create_application, target.company=Y, target.role=X, and (for 'applied' phrasing) "
@@ -84,10 +93,19 @@ _SYSTEM_PROMPT = (
     "not name a company/role (the backend resolves context).\n"
     "- 'For <Company> <Role> application, set priority to medium, location hybrid' → "
     "intent=update_application, target.company/role set, changes populated.\n"
+    "- 'For <Company> <Role> application, set status to rejected' → intent=update_application, "
+    "target.company=<Company>, target.role=<Role>, changes.status='rejected'. Any 'set status to "
+    "<value>' is ALWAYS update_application, even when the status is 'rejected' and even when a role "
+    "noun phrase like 'data scientist application' appears in the sentence.\n"
     "- 'add a note saying ...' / 'note that ...' / 'I connected with their recruiter, add that as a "
     "note' → intent=append_note, note=<the prose>, changes ALL null.\n"
-    "- 'archive <Company> <Role>' / 'remove from active list' → intent=archive_application, "
-    "target set, changes all null, note null.\n"
+    "- 'archive <Company> <Role>' / 'remove from active list' / 'I'm not pursuing them anymore' → "
+    "intent=archive_application, target set, changes all null, note null. archive_application is ONLY "
+    "for explicitly removing/hiding an application from the active list. A rejection or a 'rejected' "
+    "status is NOT an archive — it is intent=update_application with changes.status='rejected'. "
+    "'set status to rejected', 'mark <Company> as rejected', 'change status to rejected' → "
+    "intent=update_application, changes.status='rejected' (NEVER archive_application). Only choose "
+    "archive_application when the user literally says archive / remove from list / hide / take it off.\n"
     "- If the message mixes a field update AND a note (e.g. 'set priority to medium and add a note "
     "saying recruiter replied'), still extract BOTH the changes and the note honestly into the same "
     "object. The backend will detect the conflict and refuse safely — do not drop either part.\n"
@@ -95,34 +113,96 @@ _SYSTEM_PROMPT = (
     "guess the user's likely goal, fill suggested_phrasings with 1-3 short rephrasings such as "
     '"set priority of <Company> to medium".\n'
     "\n"
+    "Indirect / casual status & lifecycle phrasings (these are real commands, NOT 'unsupported'):\n"
+    "- 'I applied to <Company>' / 'I think I applied to <Company> last week' / 'just applied at "
+    "<Company>' → if the message reads like first-time tracking, intent=create_application with "
+    "target.company set and changes.status='applied'; if it clearly refers to an application already "
+    "being tracked, intent=update_application with changes.status='applied'. When unsure between the "
+    "two for an 'I applied to <Company>' phrasing, prefer create_application.\n"
+    "- '<Company> turned me down' / '<Company> rejected me' / 'didn't get <Company>' / 'no luck with "
+    "<Company>' → intent=update_application, target.company=<Company>, changes.status='rejected'.\n"
+    "- 'got an offer from <Company>' / 'got accepted at <Company>' / '<Company> accepted me' / "
+    "'I'm in!' about a company → intent=update_application, target.company=<Company>, "
+    "changes.status='accepted'.\n"
+    "- '<Company> got back to me' / 'I'm in touch with <Company>' / 'heard back from <Company>' "
+    "(stating it happened, not asking) → intent=update_application, target.company=<Company>, "
+    "changes.status='in_touch'.\n"
+    "- '<Company> is remote' / 'the <Company> role is remote by the way' → intent=update_application, "
+    "target.company=<Company>, changes.location_mode='remote' (or hybrid / on-site).\n"
+    "- 'the <Company> one should be higher priority' / 'bump <Company>' / 'make <Company> a priority' "
+    "→ intent=update_application, target.company=<Company>, changes.priority='HIGH'.\n"
+    "- 'been meaning to add the <Company> <Role> role' / 'should track <Company> for <Role>' / "
+    "'add the <Company> <Role>' → intent=create_application, target.company=<Company>, "
+    "target.role=<Role>. ALWAYS pull the company name out of such sentences into target.company.\n"
+    "\n"
+    "Questions are NOT commands. If the user is ASKING for information rather than telling you to "
+    "change something — 'how many applications do I have?', \"what's the status of my <Company> "
+    "application?\", 'show me my applications', 'have I heard back from <Company>?', 'which ones are "
+    "high priority?' — return intent='unsupported' with all changes null and no note. Never emit a "
+    "mutating intent for a question. A sentence ending in '?' or starting with how/what/which/show/"
+    "list/have/did is almost always a question.\n"
+    "\n"
     "Value vocabulary (normalize toward these; the backend will canonicalize further):\n"
     "- priority: LOW | MEDIUM | HIGH\n"
     "- location_mode: remote | hybrid | on-site\n"
     "- employment_types items: Internship | Full Time | Part Time\n"
     "- status: in_touch | applied | accepted | rejected\n"
     "- current_stages items: Tailored | Applied | Networked | Engaged | COLD_MAIL | Followed up\n"
+    "\n"
+    "CONTEXT RESOLUTION RULES\n"
+    "You will receive a Context block before the Command. Use it as follows:\n"
+    "1. If the Command mentions a company name ANYWHERE — even indirectly like 'the Spotify "
+    "one' or 'bump Acme' — ALWAYS extract that company into target.company. A company named in "
+    "the Command always overrides the selected application. Never put a company name in role.\n"
+    "2. ONLY when the Command names no company at all (e.g. 'add a note', 'set priority high', "
+    "'mark as applied') and the Context shows a selected application, copy that selected "
+    "application's company into target.company.\n"
+    "3. If the Command names no company AND the Context shows no selected application, leave "
+    "target.company null (the backend will ask which application to target).\n"
+    "4. Never infer the target from anything other than the current Command text or the "
+    "Context block. There is no conversation history; do not invent identities.\n"
 )
 
 
-def _build_user_message(transcript: str, read_only_context: dict | None) -> str:
-    """Compact, advisory context. IDs here are NEVER trusted; the backend verifies."""
+def _format_context_block(read_only_context: dict | None) -> str:
+    """Render the selected-application fact as an explicit, unambiguous prefix.
+
+    The model is TOLD what is selected rather than having to infer it. IDs are
+    never exposed here — the backend re-resolves and verifies every target.
+    """
     context = read_only_context or {}
-    safe_context = {
-        "active_draft": context.get("active_draft"),
-        "active_application": context.get("active_application"),
-        "known_applications": context.get("known_applications"),
-    }
-    return json.dumps(
-        {
-            "message": transcript,
-            "context": safe_context,
-            "instruction": (
-                "Return one JSON object matching the schema for this message. "
-                "Context is advisory only; do not invent identities it does not contain."
-            ),
-        },
-        ensure_ascii=False,
+    active_application = context.get("active_application") or {}
+    active_draft = context.get("active_draft")
+
+    company = active_application.get("company") if isinstance(active_application, dict) else None
+    role = active_application.get("role") if isinstance(active_application, dict) else None
+
+    if company:
+        selected = f"{company} — {role}" if role else str(company)
+    else:
+        selected = "none"
+
+    draft_active = "yes" if active_draft else "no"
+
+    return (
+        "Context:\n"
+        f"- Selected application: {selected}\n"
+        f"- Draft active: {draft_active}\n"
     )
+
+
+def _build_user_message(transcript: str, read_only_context: dict | None) -> str:
+    """Structured context prefix + the current command.
+
+    The selected application is injected as an explicit fact (see
+    ``_format_context_block``) so the model resolves the target from the current
+    Context block, not from any implicit history. The noisy full
+    ``known_applications`` list is intentionally NOT included — dumping every
+    company into the prompt let short/ambiguous names pattern-match the wrong
+    application. IDs are never exposed; the backend re-resolves and verifies.
+    """
+    context_block = _format_context_block(read_only_context)
+    return f"{context_block}\nCommand: {transcript}"
 
 
 def _post_chat(settings: OllamaSettings, transcript: str, read_only_context: dict | None) -> tuple[dict, int]:
@@ -170,6 +250,27 @@ def _parse_message_content(payload: dict) -> dict:
     return decoded
 
 
+def _lift_misplaced_note(raw: dict) -> dict:
+    """Lift a hallucinated ``changes.note`` up to the top-level ``note`` field.
+
+    Small models sometimes emit ``{"changes": {"note": "..."}}`` even though
+    ``note`` is not a valid ``changes`` key. ``extra="forbid"`` would otherwise
+    reject the entire payload (dropping the command). Since ``note`` is a
+    first-class top-level field, lifting it is strictly safe: we only move it
+    when the top-level ``note`` is absent/empty, and we never overwrite it.
+    """
+    changes = raw.get("changes")
+    if not isinstance(changes, dict) or "note" not in changes:
+        return raw
+
+    misplaced = changes.get("note")
+    repaired_changes = {k: v for k, v in changes.items() if k != "note"}
+    repaired = {**raw, "changes": repaired_changes}
+    if not raw.get("note") and isinstance(misplaced, str) and misplaced.strip():
+        repaired["note"] = misplaced
+    return repaired
+
+
 def extract_semantic_command_once(
     transcript: str,
     read_only_context: dict | None = None,
@@ -188,6 +289,8 @@ def extract_semantic_command_once(
     payload, latency_ms = _post_chat(resolved_settings, transcript, read_only_context)
     raw = _parse_message_content(payload)
     logger.info("semantic_single_extractor_raw_output=%s", json.dumps(raw, ensure_ascii=False)[:2000])
+
+    raw = _lift_misplaced_note(raw)
 
     try:
         command = SemanticCommand.model_validate(raw)
